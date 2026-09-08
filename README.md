@@ -21,7 +21,11 @@ npm install
 npm start
 ```
 
-Сервер слухає `http://localhost:3000`.
+Сервер слухає `http://localhost:3000`. Порт задається змінною `PORT`:
+
+```bash
+PORT=8080 npm start
+```
 
 ## Що є в контракті
 
@@ -45,4 +49,28 @@ npm run test:pact
 
 ```bash
 ls pacts/*.json
+```
+
+Спека валідна (`redocly lint`, warnings дозволені, errors — ні):
+
+```bash
+npm run spec:lint
+```
+
+Бандл спеки у `spec.json`:
+
+```bash
+npm run spec:bundle
+```
+
+Обсяг спеки та параметр Idempotency-Key (по зібраному `spec.json`):
+
+```bash
+node -e "const s=require('./spec.json'),M=['get','post','put','patch','delete'];const ops=Object.entries(s.paths).flatMap(([p,v])=>Object.keys(v).filter(m=>M.includes(m)).map(m=>[p,m]));const idem=ops.flatMap(([p,m])=>s.paths[p][m].parameters??[]).find(x=>x.in==='header'&&/idempotency-key/i.test(x.name));console.log('операцій:',ops.length,'· ресурсів:',new Set(Object.keys(s.paths).map(p=>p.split('/')[1])).size);console.log('Idempotency-Key: required =',idem?.required,'· опис, символів =',(idem?.description??'').trim().length)"
+```
+
+Grep-перевірки контракту:
+
+```bash
+grep -c 'Idempotency-Key' openapi/openapi.yaml; grep -c 'next_cursor' openapi/openapi.yaml; grep -c 'application/problem+json' openapi/openapi.yaml
 ```

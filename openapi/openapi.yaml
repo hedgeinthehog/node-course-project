@@ -10,7 +10,13 @@ info:
     cents. Every 4xx error is returned as application/problem+json (RFC 7807).
 security: []
 servers:
-  - url: http://localhost:3000
+  - url: http://{host}:{port}
+    variables:
+      host:
+        default: localhost
+      port:
+        default: '3000'
+        description: Matches the PORT environment variable of the server.
 tags:
   - name: products
     description: Catalogue of products for sale.
@@ -33,6 +39,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ProductPage'
+              examples:
+                firstPage:
+                  summary: First page, more pages follow
+                  value:
+                    items:
+                      - { id: 1, name: Keyboard, price_cents: 259900 }
+                      - { id: 2, name: Mouse, price_cents: 89900 }
+                    next_cursor: Mg
+                lastPage:
+                  summary: Last page
+                  value:
+                    items:
+                      - { id: 3, name: Monitor, price_cents: 1249900 }
+                    next_cursor: null
         '400':
           $ref: '#/components/responses/BadRequest'
         default:
@@ -71,6 +91,9 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Product'
+              examples:
+                created:
+                  value: { id: 4, name: Cable, price_cents: 19900 }
         '400':
           $ref: '#/components/responses/BadRequest'
         '422':
@@ -92,6 +115,9 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Product'
+              examples:
+                product:
+                  value: { id: 1, name: Keyboard, price_cents: 259900 }
         '400':
           $ref: '#/components/responses/BadRequest'
         '404':
@@ -114,6 +140,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/OrderPage'
+              examples:
+                lastPage:
+                  summary: Single page, no more pages
+                  value:
+                    items:
+                      - id: 1
+                        items:
+                          - { product_id: 1, quantity: 2 }
+                        total_cents: 519800
+                        status: pending
+                        created_at: '2026-09-02T09:49:29.909Z'
+                    next_cursor: null
         '400':
           $ref: '#/components/responses/BadRequest'
         default:
@@ -155,6 +193,15 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Order'
+              examples:
+                created:
+                  value:
+                    id: 1
+                    items:
+                      - { product_id: 1, quantity: 2 }
+                    total_cents: 519800
+                    status: pending
+                    created_at: '2026-09-02T09:49:29.909Z'
         '400':
           $ref: '#/components/responses/BadRequest'
         '404':
@@ -182,6 +229,15 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Order'
+              examples:
+                order:
+                  value:
+                    id: 1
+                    items:
+                      - { product_id: 1, quantity: 2 }
+                    total_cents: 519800
+                    status: pending
+                    created_at: '2026-09-02T09:49:29.909Z'
         '400':
           $ref: '#/components/responses/BadRequest'
         '404':
