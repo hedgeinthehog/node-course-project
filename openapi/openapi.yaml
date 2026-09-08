@@ -1,0 +1,429 @@
+openapi: 3.0.3
+info:
+  title: Marketplace API
+  version: 1.0.0
+  license:
+    name: UNLICENSED
+    url: https://choosealicense.com/no-permission/
+  description: >-
+    Contract for the Marketplace course project. Money is always in integer
+    cents. Every 4xx error is returned as application/problem+json (RFC 7807).
+security: []
+servers:
+  - url: http://{host}:{port}
+    variables:
+      host:
+        default: localhost
+      port:
+        default: '3000'
+        description: Matches the PORT environment variable of the server.
+tags:
+  - name: products
+    description: Catalogue of products for sale.
+  - name: orders
+    description: Customer orders placed for products.
+
+paths:
+  /products:
+    get:
+      tags: [products]
+      operationId: listProducts
+      summary: List products (cursor-paginated)
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: A page of products.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductPage'
+              examples:
+                firstPage:
+                  summary: First page, more pages follow
+                  value:
+                    items:
+                      - { id: 1, name: Keyboard, price_cents: 259900 }
+                      - { id: 2, name: Mouse, price_cents: 89900 }
+                    next_cursor: Mg
+                lastPage:
+                  summary: Last page
+                  value:
+                    items:
+                      - { id: 3, name: Monitor, price_cents: 1249900 }
+                    next_cursor: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+    post:
+      tags: [products]
+      operationId: createProduct
+      summary: Create a product
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: >-
+            Client-generated unique key (e.g. UUID) that makes the request safe to retry.
+            Repeating the request with the same key and the same body returns the same
+            response as the first attempt (same status and body) with the header
+            `Idempotency-Replay: true` and does not create a second resource.
+            Reusing the key with a different body is rejected with 422.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProduct'
+      responses:
+        '201':
+          description: Product created (or replayed for a repeated Idempotency-Key).
+          headers:
+            Idempotency-Replay:
+              $ref: '#/components/headers/IdempotencyReplay'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+              examples:
+                created:
+                  value: { id: 4, name: Cable, price_cents: 19900 }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/IdempotencyConflict'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+
+  /products/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [products]
+      operationId: getProduct
+      summary: Get a product by id
+      responses:
+        '200':
+          description: The product.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+              examples:
+                product:
+                  value: { id: 1, name: Keyboard, price_cents: 259900 }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+
+  /orders:
+    get:
+      tags: [orders]
+      operationId: listOrders
+      summary: List orders (cursor-paginated)
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: A page of orders.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderPage'
+              examples:
+                lastPage:
+                  summary: Single page, no more pages
+                  value:
+                    items:
+                      - id: 1
+                        items:
+                          - { product_id: 1, quantity: 2 }
+                        total_cents: 519800
+                        status: pending
+                        created_at: '2026-09-02T09:49:29.909Z'
+                    next_cursor: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+    post:
+      tags: [orders]
+      operationId: createOrder
+      summary: Place an order
+      description: >-
+        Creates an order from the given items. The total is computed server-side
+        from current product prices, in integer cents.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: >-
+            Client-generated unique key (e.g. UUID) that makes the request safe to retry.
+            Repeating the request with the same key and the same body returns the same
+            response as the first attempt (same status and body) with the header
+            `Idempotency-Replay: true` and does not create a second resource.
+            Reusing the key with a different body is rejected with 422.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrder'
+      responses:
+        '201':
+          description: Order created (or replayed for a repeated Idempotency-Key).
+          headers:
+            Idempotency-Replay:
+              $ref: '#/components/headers/IdempotencyReplay'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+              examples:
+                created:
+                  value:
+                    id: 1
+                    items:
+                      - { product_id: 1, quantity: 2 }
+                    total_cents: 519800
+                    status: pending
+                    created_at: '2026-09-02T09:49:29.909Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: One of the referenced products does not exist.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          $ref: '#/components/responses/IdempotencyConflict'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+
+  /orders/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [orders]
+      operationId: getOrder
+      summary: Get an order by id
+      responses:
+        '200':
+          description: The order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+              examples:
+                order:
+                  value:
+                    id: 1
+                    items:
+                      - { product_id: 1, quantity: 2 }
+                    total_cents: 519800
+                    status: pending
+                    created_at: '2026-09-02T09:49:29.909Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+
+components:
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+    Limit:
+      name: limit
+      in: query
+      description: Maximum number of items per page.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Cursor:
+      name: cursor
+      in: query
+      description: >-
+        Opaque pagination token taken from `next_cursor` of the previous page.
+        Do not construct or parse it on the client. Omit it to get the first page.
+      schema:
+        type: string
+        minLength: 1
+
+  headers:
+    IdempotencyReplay:
+      description: Present and `true` when the response was replayed from a previous request with the same Idempotency-Key.
+      schema:
+        type: boolean
+
+  responses:
+    BadRequest:
+      description: The request violates the contract (missing header, invalid body or parameters).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    NotFound:
+      description: The resource does not exist.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    IdempotencyConflict:
+      description: The Idempotency-Key was already used with a different request body.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    UnexpectedError:
+      description: Unexpected error.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+  schemas:
+    Problem:
+      type: object
+      description: Error payload as defined by RFC 7807.
+      required: [type, title, status, detail, instance]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: URI identifying the error type.
+        title:
+          type: string
+          description: Short, human-readable summary of the error type.
+        status:
+          type: integer
+          description: HTTP status code.
+        detail:
+          type: string
+          description: Explanation specific to this occurrence.
+        instance:
+          type: string
+          description: URI of the request that produced the error.
+
+    Product:
+      type: object
+      additionalProperties: false
+      required: [id, name, price_cents]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        price_cents:
+          type: integer
+          minimum: 0
+          description: Price in integer cents.
+
+    CreateProduct:
+      type: object
+      additionalProperties: false
+      required: [name, price_cents]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        price_cents:
+          type: integer
+          minimum: 0
+
+    ProductPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Product'
+        next_cursor:
+          type: string
+          nullable: true
+          description: Opaque token for the next page; null when there are no more pages.
+
+    OrderItem:
+      type: object
+      additionalProperties: false
+      required: [product_id, quantity]
+      properties:
+        product_id:
+          type: integer
+          minimum: 1
+        quantity:
+          type: integer
+          minimum: 1
+
+    CreateOrder:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/OrderItem'
+
+    Order:
+      type: object
+      additionalProperties: false
+      required: [id, items, total_cents, status, created_at]
+      properties:
+        id:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrderItem'
+        total_cents:
+          type: integer
+          minimum: 0
+          description: Order total in integer cents.
+        status:
+          type: string
+          enum: [pending, paid, cancelled]
+        created_at:
+          type: string
+          format: date-time
+
+    OrderPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Order'
+        next_cursor:
+          type: string
+          nullable: true
+          description: Opaque token for the next page; null when there are no more pages.
