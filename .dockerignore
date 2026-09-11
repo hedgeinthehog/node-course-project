@@ -1,0 +1,11 @@
+node_modules
+dist
+.git
+.idea
+.env
+.env.*
+!.env.example
+secrets
+pacts
+test
+spec.json

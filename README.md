@@ -12,12 +12,15 @@
 
 ## Вимоги
 
-Node.js ≥ 22.12.0.
+Node.js ≥ 22.12.0, Docker з Compose (для Postgres та образу).
 
 ## Запуск
 
 ```bash
 npm install
+cp .env.example .env
+mkdir -p secrets && printf 'marketplace_dev' > secrets/db_password
+npm run db:up
 npm start
 ```
 
@@ -25,6 +28,69 @@ npm start
 
 ```bash
 PORT=8080 npm start
+```
+
+## Configuration
+
+Усі змінні описані однією zod-схемою у `src/config/env.schema.ts`. Схема виконується на старті
+через `validate` у `ConfigModule.forRoot`: зламана або відсутня змінна означає, що процес не стартує,
+у виводі — назва змінної та причина, exit code ≠ 0. У коді конфіг читається лише через
+`ConfigService<Env, true>`, прямих звернень до `process.env` немає.
+
+| Змінна | Обовʼязкова | Дефолт | Призначення |
+| --- | --- | --- | --- |
+| `NODE_ENV` | ні | `development` | режим: `development` / `test` / `production` |
+| `PORT` | ні | `3000` | HTTP-порт API |
+| `DB_URL` | так | — | URL Postgres **без пароля**, напр. `postgres://marketplace@localhost:5433/marketplace` |
+| `DB_PASSWORD_FILE` | так | — | шлях до файла з паролем Postgres, напр. `secrets/db_password` |
+
+Контракт змінних — `.env.example` (у git). Реальний `.env` і тека `secrets/` — у `.gitignore`
+та `.dockerignore`, у docker-образ вони не потрапляють.
+
+Пароль БД застосунок читає не з env, а з файла `DB_PASSWORD_FILE`: у `pg.Pool` поле `password` —
+функція, яка перечитує файл на кожне нове зʼєднання. Тому пароль можна ротувати без рестарту.
+
+Postgres для локального запуску — `docker-compose.yml` (порт хоста `5433`, щоб не конфліктувати
+з локальним Postgres). Стартовий пароль контейнер бере з того самого файла `secrets/db_password`
+(`POSTGRES_PASSWORD_FILE`), тож після `npm run db:down` (`docker compose down -v`) нова база
+ініціалізується з поточним вмістом файла — файл і БД не розходяться, повертати стартове значення не треба.
+
+### Ротація пароля БД без рестарту
+
+1. Запамʼятайте uptime: `curl localhost:3000/health`.
+2. Виконайте `bash rotate.sh`. Скрипт: `ALTER ROLE` з новим паролем → записує його у
+   `secrets/db_password` → закриває старі зʼєднання (`pg_terminate_backend`).
+3. Повторіть `curl localhost:3000/health` — відповідь `200`, `db: ok`, uptime більший за попередній:
+   процес не перезапускався, нові зʼєднання пулу взяли пароль із файла.
+
+```bash
+curl -s localhost:3000/health; bash rotate.sh; curl -s localhost:3000/health
+```
+
+### Перевірки конфігурації
+
+Fail-fast (без `.env`, щоб dotenv не підхопив змінну з файла):
+
+```bash
+mv .env /tmp && env -u DB_URL npm run start; echo "exit=$?"; mv /tmp/.env .
+```
+
+`.env.example` синхронний зі схемою (exit 1, якщо файл відстав):
+
+```bash
+npm run check:env
+```
+
+Секрет не в git:
+
+```bash
+git status --ignored --porcelain | grep -E '^!! .*\.env$'; git ls-files | grep -c '\.env$'
+```
+
+Секрет не в образі:
+
+```bash
+docker build -t myapp . && docker run --rm myapp ls -a /app && docker run --rm myapp sh -c 'cat /app/.env' 2>&1; docker inspect --format '{{.Config.Env}}' myapp
 ```
 
 ## Що є в контракті
