@@ -22,8 +22,34 @@ tags:
     description: Catalogue of products for sale.
   - name: orders
     description: Customer orders placed for products.
+  - name: health
+    description: Service health.
 
 paths:
+  /health:
+    get:
+      tags: [health]
+      operationId: getHealth
+      summary: Liveness and database connectivity check
+      responses:
+        '200':
+          description: Service and database are reachable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              examples:
+                healthy:
+                  value: { status: ok, db: ok, uptime: 42 }
+        '503':
+          description: Database is unreachable.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+
   /products:
     get:
       tags: [products]
@@ -306,6 +332,21 @@ components:
             $ref: '#/components/schemas/Problem'
 
   schemas:
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status, db, uptime]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        db:
+          type: string
+          enum: [ok]
+        uptime:
+          type: integer
+          description: Seconds since the process started.
+
     Problem:
       type: object
       description: Error payload as defined by RFC 7807.
