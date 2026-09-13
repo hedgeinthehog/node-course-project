@@ -18,6 +18,7 @@ const TITLES: Record<number, string> = {
   404: 'Not Found',
   422: 'Unprocessable Entity',
   500: 'Internal Server Error',
+  503: 'Service Unavailable',
 };
 
 @Catch()

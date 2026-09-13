@@ -12,12 +12,15 @@
 
 ## Вимоги
 
-Node.js ≥ 22.12.0.
+Node.js ≥ 22.12.0, Docker з Compose (для Postgres та образу).
 
 ## Запуск
 
 ```bash
 npm install
+cp .env.example .env
+mkdir -p secrets && printf 'marketplace_a:marketplace_dev' > secrets/db_password
+npm run db:up
 npm start
 ```
 
@@ -25,6 +28,87 @@ npm start
 
 ```bash
 PORT=8080 npm start
+```
+
+## Configuration
+
+Усі змінні описані однією zod-схемою у `src/config/env.schema.ts`. Схема виконується на старті
+через `validate` у `ConfigModule.forRoot`: зламана або відсутня змінна означає, що процес не стартує,
+у виводі — назва змінної та причина, exit code ≠ 0. У коді конфіг читається лише через
+`ConfigService<Env, true>`, прямих звернень до `process.env` немає.
+
+| Змінна | Обовʼязкова | Дефолт | Призначення |
+| --- | --- | --- | --- |
+| `NODE_ENV` | ні | `development` | режим: `development` / `test` / `production` |
+| `PORT` | ні | `3000` | HTTP-порт API |
+| `DB_URL` | так | — | URL Postgres **без облікових даних**, напр. `postgres://localhost:5433/marketplace` |
+| `DB_PASSWORD_FILE` | так | — | шлях до файла-секрета формату `user:password`, напр. `secrets/db_password` |
+
+Контракт змінних — `.env.example` (у git). Реальний `.env` і тека `secrets/` — у `.gitignore`
+та `.dockerignore`, у docker-образ вони не потрапляють.
+
+Облікові дані БД застосунок читає не з env, а з файла `DB_PASSWORD_FILE` у форматі `user:password`:
+пул `pg.Pool` створює зʼєднання через власний `Client`, який перечитує файл на кожне нове зʼєднання.
+Тому і користувача, і пароль можна ротувати без рестарту.
+
+Postgres для локального запуску — `docker-compose.yml` (порт хоста `5433`, щоб не конфліктувати
+з локальним Postgres; `npm run db:up` чекає на healthcheck, тож `npm run db:up && npm start` не
+стартує раніше за готовність БД). `db/init.sql` створює дві рівноправні login-ролі `marketplace_a`
+і `marketplace_b` (обидві — члени групової ролі `marketplace`, власника бази) зі стартовим паролем
+`marketplace_dev`. Стартовий вміст файла-секрета — `marketplace_a:marketplace_dev`. Після
+`npm run db:down` (`docker compose down -v`) база повертається до стартового пароля, а файл
+лишається з ротованим — поверніть у файл стартове значення перед наступним `npm run db:up`:
+
+```bash
+printf 'marketplace_a:marketplace_dev' > secrets/db_password
+```
+
+Якщо `/health` відповідає `503` з `password authentication failed`, файл і БД розійшлися.
+Синхронізуйте пароль ролі з файлом:
+
+```bash
+docker compose exec -T postgres psql -U postgres -d marketplace -c "ALTER ROLE $(cut -d: -f1 secrets/db_password) PASSWORD '$(cut -d: -f2 secrets/db_password)'"
+```
+
+### Ротація пароля БД без рестарту
+
+1. Запамʼятайте uptime: `curl localhost:3000/health`.
+2. Виконайте `bash rotate.sh`. Скрипт підвантажує `.env`, бере шлях до файла з `DB_PASSWORD_FILE`
+   і назву бази з `DB_URL`, далі за схемою alternating users: визначає поточну роль із файла →
+   `ALTER ROLE` з новим паролем для **іншої** ролі → атомарно (через `mv`) перезаписує файл на
+   `інша_роль:новий_пароль` → закриває зʼєднання попередньої ролі (`pg_terminate_backend`).
+   Поточна роль під час ротації не змінюється, тому вікна зі старим паролем немає.
+3. Повторіть `curl localhost:3000/health` — відповідь `200`, `db: ok`, uptime більший за попередній:
+   процес не перезапускався, нові зʼєднання пулу взяли облікові дані з файла.
+
+```bash
+curl -s localhost:3000/health; bash rotate.sh; curl -s localhost:3000/health
+```
+
+### Перевірки конфігурації
+
+Fail-fast (без `.env`, щоб dotenv не підхопив змінну з файла):
+
+```bash
+mv .env /tmp && env -u DB_URL npm run start; echo "exit=$?"; mv /tmp/.env .
+```
+
+`.env.example` синхронний зі схемою (exit 1, якщо файл відстав):
+
+```bash
+npm run check:env
+```
+
+Секрет не в git:
+
+```bash
+git status --ignored --porcelain | grep -E '^!! .*\.env$'; git ls-files | grep -c '\.env$'
+```
+
+Секрет не в образі:
+
+```bash
+docker build -t myapp . && docker run --rm myapp ls -a /app && docker run --rm myapp sh -c 'cat /app/.env' 2>&1; docker inspect --format '{{.Config.Env}}' myapp
 ```
 
 ## Що є в контракті
