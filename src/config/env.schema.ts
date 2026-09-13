@@ -8,8 +8,8 @@ export const envSchema = z.object({
   DB_URL: z
     .string()
     .url()
-    .refine((url) => !new URL(url).password, {
-      message: 'must not contain a password, use DB_PASSWORD_FILE instead',
+    .refine((url) => !new URL(url).username && !new URL(url).password, {
+      message: 'must not contain credentials, use DB_PASSWORD_FILE instead',
     }),
   DB_PASSWORD_FILE: z.string().min(1),
 });

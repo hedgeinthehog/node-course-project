@@ -1,10 +1,18 @@
-import { readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { Logger, Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Pool } from 'pg';
+import { Client, Pool, PoolConfig } from 'pg';
 import { Env } from '../config/env.schema';
 
 export const PG_POOL = 'PG_POOL';
+
+function readCredentials(file: string) {
+  const [user, password] = readFileSync(file, 'utf8').trim().split(':');
+  if (!user || !password) {
+    throw new Error(`${file} must contain "user:password"`);
+  }
+  return { user, password };
+}
 
 @Module({
   providers: [
@@ -14,12 +22,18 @@ export const PG_POOL = 'PG_POOL';
       useFactory: (config: ConfigService<Env, true>) => {
         const url = new URL(config.get('DB_URL', { infer: true }));
         const passwordFile = config.get('DB_PASSWORD_FILE', { infer: true });
+
+        class SecretFileClient extends Client {
+          constructor(options: PoolConfig) {
+            super({ ...options, ...readCredentials(passwordFile) });
+          }
+        }
+
         const pool = new Pool({
           host: url.hostname,
           port: Number(url.port) || 5432,
-          user: decodeURIComponent(url.username),
           database: url.pathname.slice(1),
-          password: () => readFile(passwordFile, 'utf8').then((s) => s.trim()),
+          Client: SecretFileClient as unknown as PoolConfig['Client'],
         });
         pool.on('error', (err) => {
           new Logger('PgPool').warn(`idle client error: ${err.message}`);
