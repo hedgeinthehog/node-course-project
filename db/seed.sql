@@ -62,4 +62,4 @@ FROM (
 ) AS t
 WHERE t.order_id = o.id;
 
-VACUUM (ANALYZE);
+VACUUM (ANALYZE) users, products, orders, order_items;
