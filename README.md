@@ -19,7 +19,7 @@ Node.js ≥ 22.12.0, Docker з Compose (для Postgres та образу).
 ```bash
 npm install
 cp .env.example .env
-mkdir -p secrets && printf 'marketplace_a:marketplace_dev' > secrets/db_password
+cp secrets/db_password.example secrets/db_password
 npm run db:up
 npm start
 ```
@@ -37,12 +37,12 @@ PORT=8080 npm start
 у виводі — назва змінної та причина, exit code ≠ 0. У коді конфіг читається лише через
 `ConfigService<Env, true>`, прямих звернень до `process.env` немає.
 
-| Змінна | Обовʼязкова | Дефолт | Призначення |
-| --- | --- | --- | --- |
-| `NODE_ENV` | ні | `development` | режим: `development` / `test` / `production` |
-| `PORT` | ні | `3000` | HTTP-порт API |
-| `DB_URL` | так | — | URL Postgres **без облікових даних**, напр. `postgres://localhost:5433/marketplace` |
-| `DB_PASSWORD_FILE` | так | — | шлях до файла-секрета формату `user:password`, напр. `secrets/db_password` |
+| Змінна | Обовʼязкова | Дефолт | Призначення | Джерело |
+| --- | --- | --- | --- | --- |
+| `NODE_ENV` | ні | `development` | режим: `development` / `test` / `production` | `.env` (dev) / env оточення (prod) |
+| `PORT` | ні | `3000` | HTTP-порт API | `.env` (dev) / env оточення (prod) |
+| `DB_URL` | так | — | URL Postgres **без облікових даних**, напр. `postgres://localhost:5433/marketplace`; вказує на базу з `db/schema.sql` | сховище: локальний `.env` поза git (dev), env оточення платформи (prod) |
+| `DB_PASSWORD_FILE` | так | — | шлях до файла-секрета формату `user:password`, напр. `secrets/db_password` | сховище: файл-секрет поза git, ротується `rotate.sh`; шаблон — `secrets/db_password.example` |
 
 Контракт змінних — `.env.example` (у git). Реальний `.env` і тека `secrets/` — у `.gitignore`
 та `.dockerignore`, у docker-образ вони не потрапляють.
@@ -60,7 +60,7 @@ Postgres для локального запуску — `docker-compose.yml` (п
 лишається з ротованим — поверніть у файл стартове значення перед наступним `npm run db:up`:
 
 ```bash
-printf 'marketplace_a:marketplace_dev' > secrets/db_password
+cp secrets/db_password.example secrets/db_password
 ```
 
 Якщо `/health` відповідає `503` з `password authentication failed`, файл і БД розійшлися.
@@ -122,6 +122,72 @@ docker build -t myapp . && docker run --rm myapp ls -a /app && docker run --rm m
 - **Idempotency-Key**: обовʼязковий header на обох POST. Той самий ключ + те саме тіло → та сама відповідь `201` + `Idempotency-Replay: true`; той самий ключ + інше тіло → `422`.
 - **problem+json**: кожна помилка — `application/problem+json` зі схемою `Problem` (`type`, `title`, `status`, `detail`, `instance`).
 - Гроші — цілі копійки (`price_cents`, `total_cents`).
+
+## База даних
+
+Схема Marketplace — `db/schema.sql`: `users`, `products`, `orders`, `order_items`, 4 зовнішні ключі,
+CHECK на статуси, ціни й кількості, `timestamptz` для часу. Гроші — цілі копійки (`price_cents`,
+`total_cents`, integer/bigint), як і в OpenAPI-контракті: це точна арифметика без float і без
+рядкових decimal. У `products` є генерована колонка `search_vector tsvector` під повнотекстовий пошук.
+
+- Головна таблиця: **`orders`** (300 000 рядків після seed).
+- Таблиця пошуку (q4): **`products`** (200 000 рядків).
+
+Дев-креденшели стенда лежать у `docker-compose.yml` (`postgres` / `postgres`, база `marketplace`,
+порт хоста `5433`); тека `db/` змонтована в контейнер як `/db`, а робоча тека psql у контейнері — `/`,
+тому шляхи `db/schema.sql` тощо в командах нижче працюють як є.
+
+Підняти базу:
+
+```bash
+docker compose up -d --wait
+```
+
+Підключитись:
+
+```bash
+docker compose exec -T postgres psql -U postgres -d marketplace
+```
+
+Повний цикл (той самий, що виконує грейдер) на чистому томі:
+
+```bash
+docker compose down -v && docker compose up -d --wait
+```
+
+```bash
+docker compose exec -T postgres psql -U postgres -d marketplace -f db/schema.sql
+```
+
+```bash
+docker compose exec -T postgres psql -U postgres -d marketplace -f db/seed.sql
+```
+
+EXPLAIN «до» (кожен запит має дати `Seq Scan`):
+
+```bash
+for q in q1 q2 q3 q4; do docker compose exec -T postgres psql -U postgres -d marketplace -c "EXPLAIN (ANALYZE, BUFFERS) $(cat db/queries/$q.sql)"; done
+```
+
+Індекси та статистика:
+
+```bash
+docker compose exec -T postgres psql -U postgres -d marketplace -f db/indexes.sql && docker compose exec -T postgres psql -U postgres -d marketplace -c "ANALYZE;"
+```
+
+EXPLAIN «після» (без `Seq Scan`, у плані — індекс із `db/indexes.sql`; q4 прожени 2–3 рази, перший іде по холодному GIN):
+
+```bash
+for q in q1 q2 q3 q4; do docker compose exec -T postgres psql -U postgres -d marketplace -c "EXPLAIN (ANALYZE, BUFFERS) $(cat db/queries/$q.sql)"; done
+```
+
+Мертві індекси (очікується порожній вивід):
+
+```bash
+docker compose exec -T postgres psql -U postgres -d marketplace -Atc "SELECT indexrelname FROM pg_stat_user_indexes WHERE schemaname='public' AND idx_scan = 0 AND indexrelid NOT IN (SELECT conindid FROM pg_constraint WHERE conindid <> 0);"
+```
+
+Плани «до»/«після», пояснення та секція «Морфологія» — у `db/OPTIMIZATIONS.md`.
 
 ## Перевірки
 
