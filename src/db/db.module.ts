@@ -7,7 +7,10 @@ import { Env } from '../config/env.schema';
 export const PG_POOL = 'PG_POOL';
 
 function readCredentials(file: string) {
-  const [user, password] = readFileSync(file, 'utf8').trim().split(':');
+  const content = readFileSync(file, 'utf8').trim();
+  const separator = content.indexOf(':');
+  const user = content.slice(0, Math.max(separator, 0));
+  const password = content.slice(separator + 1);
   if (!user || !password) {
     throw new Error(`${file} must contain "user:password"`);
   }
