@@ -31,6 +31,7 @@ export class ProductsService {
           name: dto.name,
           description: '',
           priceCents: dto.price_cents,
+          stock: dto.stock ?? 0,
         }),
       );
       return toProductDto(product);

@@ -1,12 +1,14 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, MoreThan, Repository } from 'typeorm';
+import { DataSource, MoreThan, Repository } from 'typeorm';
+import { checkout, CheckoutError } from '../checkout/checkout';
 import { IdempotencyStore } from '../common/idempotency';
 import { buildPage, decodeCursor, Page } from '../common/pagination';
-import { OrderItem } from '../entities/order-item.entity';
 import { Order } from '../entities/order.entity';
-import { Product } from '../entities/product.entity';
-import { User } from '../entities/user.entity';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { OrderDto, toOrderDto } from './dto/order.dto';
 
@@ -21,56 +23,26 @@ export class OrdersService {
   ) {}
 
   create(key: string, dto: CreateOrderDto) {
-    return this.idempotency.run(key, dto, () =>
-      this.dataSource.transaction(async (manager) => {
-        const userId = String(dto.user_id);
-        if (!(await manager.existsBy(User, { id: userId }))) {
-          throw new NotFoundException(`User ${dto.user_id} not found`);
-        }
-
-        const quantities = new Map<string, number>();
-        for (const item of dto.items) {
-          const productId = String(item.product_id);
-          quantities.set(
-            productId,
-            (quantities.get(productId) ?? 0) + item.quantity,
-          );
-        }
-        const products = await manager.findBy(Product, {
-          id: In([...quantities.keys()]),
+    return this.idempotency.run(key, dto, async () => {
+      try {
+        const order = await checkout(this.dataSource, {
+          userId: String(dto.user_id),
+          items: dto.items.map((item) => ({
+            productId: String(item.product_id),
+            quantity: item.quantity,
+          })),
         });
-        const byId = new Map(products.map((p) => [p.id, p]));
-        for (const productId of quantities.keys()) {
-          if (!byId.has(productId)) {
-            throw new NotFoundException(`Product ${productId} not found`);
-          }
-        }
-
-        const totalCents = [...quantities].reduce(
-          (sum, [productId, quantity]) =>
-            sum + byId.get(productId)!.priceCents * quantity,
-          0,
-        );
-        const order = await manager.save(
-          manager.create(Order, {
-            userId,
-            status: 'pending',
-            totalCents: String(totalCents),
-          }),
-        );
-        order.items = await manager.save(
-          [...quantities].map(([productId, quantity]) =>
-            manager.create(OrderItem, {
-              orderId: order.id,
-              productId,
-              quantity,
-              unitPriceCents: byId.get(productId)!.priceCents,
-            }),
-          ),
-        );
         return toOrderDto(order);
-      }),
-    );
+      } catch (err) {
+        if (err instanceof CheckoutError) {
+          throw err.code === 'USER_NOT_FOUND' ||
+            err.code === 'PRODUCT_NOT_FOUND'
+            ? new NotFoundException(err.message)
+            : new ConflictException(err.message);
+        }
+        throw err;
+      }
+    });
   }
 
   async findAll(limit: number, cursor?: string): Promise<Page<OrderDto>> {

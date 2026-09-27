@@ -17,6 +17,7 @@ import { User } from './user.entity';
 @Check('chk_products_name_not_empty', 'length(name) > 0')
 @Check('chk_products_price_cents', 'price_cents >= 0')
 @Check('chk_products_status', "status IN ('active', 'archived')")
+@Check('chk_products_stock', 'stock >= 0')
 @Index('idx_products_search_vector', { synchronize: false })
 export class Product {
   @PrimaryGeneratedColumn('identity', { type: 'bigint' })
@@ -40,6 +41,9 @@ export class Product {
 
   @Column({ type: 'text', default: 'active' })
   status: 'active' | 'archived';
+
+  @Column({ type: 'integer', default: 0 })
+  stock: number;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;

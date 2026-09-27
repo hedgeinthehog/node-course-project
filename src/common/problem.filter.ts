@@ -16,6 +16,7 @@ interface ValidatorError {
 const TITLES: Record<number, string> = {
   400: 'Bad Request',
   404: 'Not Found',
+  409: 'Conflict',
   422: 'Unprocessable Entity',
   500: 'Internal Server Error',
   503: 'Service Unavailable',

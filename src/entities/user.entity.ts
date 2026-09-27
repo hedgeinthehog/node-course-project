@@ -13,6 +13,7 @@ import { Product } from './product.entity';
 
 @Entity('users')
 @Check('chk_users_name_not_empty', 'length(name) > 0')
+@Check('chk_users_balance_cents', 'balance_cents >= 0')
 @Index('idx_users_lower_email', { synchronize: false })
 export class User {
   @PrimaryGeneratedColumn('identity', { type: 'bigint' })
@@ -23,6 +24,9 @@ export class User {
 
   @Column({ type: 'text' })
   name: string;
+
+  @Column({ name: 'balance_cents', type: 'bigint', default: 0 })
+  balanceCents: string;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;
