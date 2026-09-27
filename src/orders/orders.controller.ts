@@ -17,12 +17,12 @@ export class OrdersController {
   constructor(private readonly ordersService: OrdersService) {}
 
   @Post()
-  create(
+  async create(
     @Headers('idempotency-key') key: string,
     @Body() dto: CreateOrderDto,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const { result, replayed } = this.ordersService.create(key, dto);
+    const { result, replayed } = await this.ordersService.create(key, dto);
     if (replayed) {
       res.setHeader('Idempotency-Replay', 'true');
     }
@@ -36,6 +36,6 @@ export class OrdersController {
 
   @Get(':id')
   findOne(@Param('id') id: string) {
-    return this.ordersService.findOne(Number(id));
+    return this.ordersService.findOne(id);
   }
 }

@@ -1,0 +1,40 @@
+name: ci
+
+on: [push, pull_request]
+
+jobs:
+  db:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: marketplace
+        ports: ['5433:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d marketplace"
+          --health-interval 2s --health-timeout 3s --health-retries 15
+    env:
+      SKIP_VAULT: '1'
+      DB_HOST: 127.0.0.1
+      DB_PORT: '5433'
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: marketplace
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run lint
+      - run: npm run build
+      - run: npm run migrate
+      - run: npm run check:indexes
+      - run: npm run seed && npm run seed
+      - run: npm run test:pact
+      - run: npx redocly lint openapi/openapi.yaml

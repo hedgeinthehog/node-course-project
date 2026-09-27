@@ -122,6 +122,12 @@ paths:
                   value: { id: 4, name: Cable, price_cents: 19900 }
         '400':
           $ref: '#/components/responses/BadRequest'
+        '404':
+          description: The referenced seller does not exist.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
         '422':
           $ref: '#/components/responses/IdempotencyConflict'
         default:
@@ -172,6 +178,7 @@ paths:
                   value:
                     items:
                       - id: 1
+                        user_id: 1
                         items:
                           - { product_id: 1, quantity: 2 }
                         total_cents: 519800
@@ -223,6 +230,7 @@ paths:
                 created:
                   value:
                     id: 1
+                    user_id: 1
                     items:
                       - { product_id: 1, quantity: 2 }
                     total_cents: 519800
@@ -231,7 +239,7 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
         '404':
-          description: One of the referenced products does not exist.
+          description: The user or one of the referenced products does not exist.
           content:
             application/problem+json:
               schema:
@@ -259,6 +267,7 @@ paths:
                 order:
                   value:
                     id: 1
+                    user_id: 1
                     items:
                       - { product_id: 1, quantity: 2 }
                     total_cents: 519800
@@ -386,8 +395,12 @@ components:
     CreateProduct:
       type: object
       additionalProperties: false
-      required: [name, price_cents]
+      required: [seller_id, name, price_cents]
       properties:
+        seller_id:
+          type: integer
+          minimum: 1
+          description: Id of the user who sells the product.
         name:
           type: string
           minLength: 1
@@ -425,8 +438,12 @@ components:
     CreateOrder:
       type: object
       additionalProperties: false
-      required: [items]
+      required: [user_id, items]
       properties:
+        user_id:
+          type: integer
+          minimum: 1
+          description: Id of the user placing the order.
         items:
           type: array
           minItems: 1
@@ -436,9 +453,11 @@ components:
     Order:
       type: object
       additionalProperties: false
-      required: [id, items, total_cents, status, created_at]
+      required: [id, user_id, items, total_cents, status, created_at]
       properties:
         id:
+          type: integer
+        user_id:
           type: integer
         items:
           type: array

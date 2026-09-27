@@ -14,7 +14,11 @@ export interface IdempotentResult<T> {
 export class IdempotencyStore<T> {
   private readonly entries = new Map<string, Stored<T>>();
 
-  run(key: string, body: unknown, create: () => T): IdempotentResult<T> {
+  async run(
+    key: string,
+    body: unknown,
+    create: () => Promise<T>,
+  ): Promise<IdempotentResult<T>> {
     const fingerprint = createHash('sha256')
       .update(JSON.stringify(body))
       .digest('hex');
@@ -27,7 +31,7 @@ export class IdempotencyStore<T> {
       }
       return { result: stored.result, replayed: true };
     }
-    const result = create();
+    const result = await create();
     this.entries.set(key, { fingerprint, result });
     return { result, replayed: false };
   }

@@ -1,36 +1,56 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { MoreThan, Repository } from 'typeorm';
 import { IdempotencyStore } from '../common/idempotency';
-import { Page, paginate } from '../common/pagination';
+import { buildPage, decodeCursor, Page } from '../common/pagination';
+import { Product } from '../entities/product.entity';
+import { User } from '../entities/user.entity';
 import { CreateProductDto } from './dto/create-product.dto';
-import { Product } from './entities/product.entity';
+import { ProductDto, toProductDto } from './dto/product.dto';
 
 @Injectable()
 export class ProductsService {
-  private readonly products: Product[] = [
-    { id: 1, name: 'Keyboard', price_cents: 259900 },
-    { id: 2, name: 'Mouse', price_cents: 89900 },
-    { id: 3, name: 'Monitor', price_cents: 1249900 },
-  ];
-  private nextId = 4;
-  private readonly idempotency = new IdempotencyStore<Product>();
+  private readonly idempotency = new IdempotencyStore<ProductDto>();
+
+  constructor(
+    @InjectRepository(Product)
+    private readonly products: Repository<Product>,
+    @InjectRepository(User)
+    private readonly users: Repository<User>,
+  ) {}
 
   create(key: string, dto: CreateProductDto) {
-    return this.idempotency.run(key, dto, () => {
-      const product: Product = { id: this.nextId++, ...dto };
-      this.products.push(product);
-      return product;
+    return this.idempotency.run(key, dto, async () => {
+      const sellerId = String(dto.seller_id);
+      if (!(await this.users.existsBy({ id: sellerId }))) {
+        throw new NotFoundException(`Seller ${dto.seller_id} not found`);
+      }
+      const product = await this.products.save(
+        this.products.create({
+          sellerId,
+          name: dto.name,
+          description: '',
+          priceCents: dto.price_cents,
+        }),
+      );
+      return toProductDto(product);
     });
   }
 
-  findAll(limit: number, cursor?: string): Page<Product> {
-    return paginate(this.products, limit, cursor);
+  async findAll(limit: number, cursor?: string): Promise<Page<ProductDto>> {
+    const rows = await this.products.find({
+      where: { id: MoreThan(String(decodeCursor(cursor))) },
+      order: { id: 'ASC' },
+      take: limit + 1,
+    });
+    return buildPage(rows.map(toProductDto), limit);
   }
 
-  findOne(id: number): Product {
-    const product = this.products.find((p) => p.id === id);
+  async findOne(id: string): Promise<ProductDto> {
+    const product = await this.products.findOneBy({ id });
     if (!product) {
       throw new NotFoundException(`Product ${id} not found`);
     }
-    return product;
+    return toProductDto(product);
   }
 }
