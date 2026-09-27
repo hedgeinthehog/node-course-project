@@ -1,20 +1,14 @@
-import {
-  Controller,
-  Get,
-  Inject,
-  ServiceUnavailableException,
-} from '@nestjs/common';
-import { Pool } from 'pg';
-import { PG_POOL } from '../db/db.module';
+import { Controller, Get, ServiceUnavailableException } from '@nestjs/common';
+import { DataSource } from 'typeorm';
 
 @Controller('health')
 export class HealthController {
-  constructor(@Inject(PG_POOL) private readonly pool: Pool) {}
+  constructor(private readonly dataSource: DataSource) {}
 
   @Get()
   async check() {
     try {
-      await this.pool.query('SELECT 1');
+      await this.dataSource.query('SELECT 1');
     } catch (err) {
       throw new ServiceUnavailableException(
         `database unavailable: ${(err as Error).message}`,

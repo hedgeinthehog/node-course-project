@@ -1,10 +1,10 @@
 import { readFileSync } from 'node:fs';
-import { Logger, Module } from '@nestjs/common';
+import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Client, Pool, PoolConfig } from 'pg';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { Client, ClientConfig } from 'pg';
 import { Env } from '../config/env.schema';
-
-export const PG_POOL = 'PG_POOL';
+import { entities } from '../entities';
 
 function readCredentials(file: string) {
   const content = readFileSync(file, 'utf8').trim();
@@ -18,33 +18,30 @@ function readCredentials(file: string) {
 }
 
 @Module({
-  providers: [
-    {
-      provide: PG_POOL,
+  imports: [
+    TypeOrmModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService<Env, true>) => {
         const url = new URL(config.get('DB_URL', { infer: true }));
         const passwordFile = config.get('DB_PASSWORD_FILE', { infer: true });
 
         class SecretFileClient extends Client {
-          constructor(options: PoolConfig) {
+          constructor(options: ClientConfig) {
             super({ ...options, ...readCredentials(passwordFile) });
           }
         }
 
-        const pool = new Pool({
+        return {
+          type: 'postgres',
           host: url.hostname,
           port: Number(url.port) || 5432,
           database: url.pathname.slice(1),
-          Client: SecretFileClient as unknown as PoolConfig['Client'],
-        });
-        pool.on('error', (err) => {
-          new Logger('PgPool').warn(`idle client error: ${err.message}`);
-        });
-        return pool;
+          entities,
+          synchronize: false,
+          extra: { Client: SecretFileClient },
+        };
       },
-    },
+    }),
   ],
-  exports: [PG_POOL],
 })
 export class DbModule {}

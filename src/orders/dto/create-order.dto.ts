@@ -1,5 +1,9 @@
-import { OrderItem } from '../entities/order.entity';
+export interface CreateOrderItemDto {
+  product_id: number;
+  quantity: number;
+}
 
 export interface CreateOrderDto {
-  items: OrderItem[];
+  user_id: number;
+  items: CreateOrderItemDto[];
 }

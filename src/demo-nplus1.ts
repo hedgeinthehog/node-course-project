@@ -32,10 +32,18 @@ async function main() {
     return logger.count;
   }
 
+  const sizes = process.argv
+    .slice(2)
+    .map(Number)
+    .filter((n) => Number.isInteger(n) && n > 0);
+  if (sizes.length === 0) sizes.push(5, 10);
+
   const rows = [];
-  for (const take of [5, 10]) {
+  for (const take of sizes) {
+    let fetched = 0;
     const naive = await measure(async () => {
       const list = await orders.find({ order: { id: 'ASC' }, take });
+      fetched = list.length;
       for (const order of list) {
         const items = await dataSource
           .getRepository(OrderItem)
@@ -63,7 +71,8 @@ async function main() {
       }),
     );
     rows.push({
-      'orders (N)': take,
+      take: take,
+      'orders fetched (N)': fetched,
       'naive loop': naive,
       'relations (join)': joined,
       "relationLoadStrategy: 'query'": queryStrategy,

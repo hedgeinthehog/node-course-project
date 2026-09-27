@@ -17,12 +17,12 @@ export class ProductsController {
   constructor(private readonly productsService: ProductsService) {}
 
   @Post()
-  create(
+  async create(
     @Headers('idempotency-key') key: string,
     @Body() dto: CreateProductDto,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const { result, replayed } = this.productsService.create(key, dto);
+    const { result, replayed } = await this.productsService.create(key, dto);
     if (replayed) {
       res.setHeader('Idempotency-Replay', 'true');
     }
@@ -36,6 +36,6 @@ export class ProductsController {
 
   @Get(':id')
   findOne(@Param('id') id: string) {
-    return this.productsService.findOne(Number(id));
+    return this.productsService.findOne(id);
   }
 }
