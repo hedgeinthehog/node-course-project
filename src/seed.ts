@@ -27,6 +27,7 @@ async function main() {
       id: String(i + 1),
       email: `seed.user${i + 1}@example.com`,
       name: `Користувач ${i + 1}`,
+      balanceCents: '100000000',
     }));
     await manager.upsert(User, users, ['id']);
 
@@ -37,6 +38,7 @@ async function main() {
       description: `${name} для щоденного використання`,
       priceCents: 19900 + i * 15000,
       status: 'active' as const,
+      stock: 10 + i * 5,
     }));
     await manager.upsert(Product, products, ['id']);
 

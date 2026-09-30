@@ -4,6 +4,7 @@ export interface ProductDto {
   id: number;
   name: string;
   price_cents: number;
+  stock: number;
 }
 
 export function toProductDto(product: Product): ProductDto {
@@ -11,5 +12,6 @@ export function toProductDto(product: Product): ProductDto {
     id: Number(product.id),
     name: product.name,
     price_cents: product.priceCents,
+    stock: product.stock,
   };
 }

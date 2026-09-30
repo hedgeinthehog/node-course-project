@@ -36,5 +36,8 @@ jobs:
       - run: npm run migrate
       - run: npm run check:indexes
       - run: npm run seed && npm run seed
+      - run: npm run demo:race
+      - run: npm run demo:workers
+      - run: npm run demo:retry
       - run: npm run test:pact
       - run: npx redocly lint openapi/openapi.yaml

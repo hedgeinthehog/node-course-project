@@ -124,6 +124,10 @@ docker build -t myapp . && docker run --rm myapp ls -a /app && docker run --rm m
 - **Idempotency-Key**: обовʼязковий header на обох POST. Той самий ключ + те саме тіло → та сама відповідь `201` + `Idempotency-Replay: true`; той самий ключ + інше тіло → `422`.
 - **problem+json**: кожна помилка — `application/problem+json` зі схемою `Problem` (`type`, `title`, `status`, `detail`, `instance`).
 - Гроші — цілі копійки (`price_cents`, `total_cents`).
+- **Checkout** (`POST /orders`) — одна транзакція: атомарний декремент `stock` кожного товару, списання
+  `balance_cents` покупця, `orders` + `order_items` + задача на post-processing у черзі `tasks`; замовлення
+  створюється зі статусом `paid`. Бракує товару або коштів → `409` problem+json і повний відкат
+  (див. «Конкурентність»).
 - Авторизації поки немає, тому власника вказує клієнт: `POST /products` вимагає `seller_id`, `POST /orders` — `user_id`
   (обидва — існуючі `users.id`, інакше `404`).
 
@@ -197,12 +201,14 @@ docker compose exec -T postgres psql -U postgres -d marketplace -Atc "SELECT ind
 
 Схема з `db/schema.sql` переїхала в код: `src/entities/` (4 entities), `src/migrations/` (початкова
 міграція), `src/data-source.ts`. У DataSource `synchronize: false` — схему змінюють лише міграції.
-`db/schema.sql` лишається артефактом ДЗ #12 для циклу EXPLAIN; джерело правди для застосунку — міграції.
+`db/schema.sql` і `db/seed.sql` лишаються артефактами ДЗ #12 для циклу EXPLAIN і не оновлюються слідом за
+міграціями (у них немає `stock`, `balance_cents`, `tasks`); джерело правди для застосунку — міграції.
 
 HTTP-шар (`src/products`, `src/orders`, `/health`) працює з цими самими entities через `TypeOrmModule`
 і репозиторії; `DbModule` віддає TypeORM той самий `pg.Client`, що перечитує файл-секрет на кожне нове
-зʼєднання, тож ротація з ДЗ #11 працює і для ORM-пулу. Оформлення замовлення — транзакція: перевірка
-користувача й товарів, `orders` + `order_items` разом, підсумок із поточних цін. Entities повертають
+зʼєднання, тож ротація з ДЗ #11 працює і для ORM-пулу. Оформлення замовлення — транзакція
+`src/checkout/checkout.ts` (декремент stock, списання балансу, `orders` + `order_items` + задача в черзі;
+деталі — у «Конкурентність»). Entities повертають
 `bigint` рядками, тому на кордоні вони мапляться в DTO контракту (`id`, `total_cents` — числа).
 
 Команди (усі, що ходять у базу, загорнуті в `scripts/with-secrets.sh dev`):
@@ -216,6 +222,9 @@ npm run seed             # детермінований ідемпотентни
 npm run demo:nplus1      # N+1 «до/після»
 npm run report           # виторг по продавцях через QueryBuilder
 npm run check:indexes    # індекси з synchronize: false існують у базі
+npm run demo:race        # 50 паралельних checkout на stock = 10 — без oversell
+npm run demo:workers     # воркер-пул через FOR UPDATE SKIP LOCKED
+npm run demo:retry       # retry транзакції на 40001/40P01
 ```
 
 Початкову міграцію згенеровано через `migration:generate`, прочитано й поправлено руками: додано чотири
@@ -297,11 +306,97 @@ Repository (`find`, `relations`, `upsert`) — коли результат є en
 
 ### Seed
 
-Ідемпотентність — кількість рядків після другого запуску не змінюється (10 / 12 / 10 / 19):
+Ідемпотентність — кількість рядків після другого запуску не змінюється (10 / 12 / 10 / 19). Seed робить
+`upsert` по фіксованих id, тому повторний запуск також повертає `stock` і `balance_cents` до seed-значень
+(зручно, щоб «обнулити» стан після демо; для продакшн-даних такий seed не призначений):
 
 ```bash
 docker compose exec -T postgres psql -U postgres -d marketplace -Atc "SELECT (SELECT count(*) FROM users), (SELECT count(*) FROM products), (SELECT count(*) FROM orders), (SELECT count(*) FROM order_items);"
 ```
+
+## Конкурентність
+
+Ключова операція домену — оформлення замовлення, `src/checkout/checkout.ts`. Вона спільна для HTTP
+(`POST /orders`) і навантажувального демо й виконується в одній транзакції `dataSource.transaction`
+(усі statements ідуть через один клієнт пулу):
+
+1. для кожного товару, у порядку зростання `id`:
+   `UPDATE products SET stock = stock - $n WHERE id = $id AND stock >= $n RETURNING price_cents`;
+   0 рядків → `INSUFFICIENT_STOCK` (або `PRODUCT_NOT_FOUND`), транзакція відкочується;
+2. `UPDATE users SET balance_cents = balance_cents - $total WHERE id = $u AND balance_cents >= $total RETURNING id`;
+   0 рядків → `INSUFFICIENT_FUNDS`;
+3. `INSERT` у `orders`, `order_items` і задача `order_confirmation` у `tasks`.
+
+Будь-яка помилка до `COMMIT` відкочує все разом: замовлень-«сиріт», списаних без замовлення коштів чи
+зарезервованого без замовлення товару не буває. Блокування беруться в одному й тому самому порядку
+(товари за `id`, потім користувач), тому два checkout з різними наборами товарів не можуть заблокувати
+один одного навхрест.
+
+**Чому атомарний UPDATE, а не `SELECT … FOR UPDATE`.** Обидва коректні, але `UPDATE … WHERE stock >= $n
+RETURNING` робить перевірку, блокування й запис одним statement: рядок береться під лок, конкурентний
+UPDATE чекає на ньому, а після `COMMIT` першого Postgres переоцінює `WHERE` на новій версії рядка
+(EvalPlanQual) — тож вікна між «прочитав 10» і «записав 9» просто не існує, і один round-trip до бази
+замість двох. `FOR UPDATE` потрібен, коли між читанням і записом має відбутись бізнес-логіка на стороні
+застосунку (порахувати знижку з кількох таблиць, викликати зовнішній сервіс) — тут її немає, тому
+песимістичний лок був би дорожчим варіантом того самого захисту. Обмеження `CHECK (stock >= 0)` і
+`CHECK (balance_cents >= 0)` у схемі — страховка на випадок, якщо хтось напише інший UPDATE без умови.
+
+`npm run demo:race`: 50 `Promise.all`-викликів `checkout` на товар `1` зі `stock = 10`, по одній одиниці,
+покупці — 10 seed-користувачів із балансом 1 000 000 грн (обмежує саме stock). Пул на 55 зʼєднань, щоб
+усі 50 транзакцій справді йшли одночасно. Числа з запуску:
+
+| Метрика | Значення |
+| --- | --- |
+| спроб | 50 |
+| успішних | 10 |
+| відхилено `INSUFFICIENT_STOCK` | 40 |
+| фінальний `stock` | 0 |
+| рядків зі `stock < 0` | 0 |
+| створено замовлень | 10 |
+| час | ≈170 ms |
+
+Скрипт сам перевіряє інваріант і завершується з exit 1, якщо успішних ≠ 10, stock ≠ 0, є відʼємний stock
+або кількість замовлень не дорівнює кількості успіхів.
+
+### Воркер-пул через SKIP LOCKED
+
+Черга — таблиця `tasks` (міграція `StockBalanceTasks`): `type`, `payload jsonb`, `status`
+(`pending`/`done`), `processed`, `worker`, `processed_at`, індекс `(status, id)`. Воркер
+(`src/tasks/worker.ts`) у циклі відкриває транзакцію, бере одну задачу
+`SELECT … WHERE status = 'pending' ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED`, обробляє її **всередині
+цієї ж транзакції** і комітить `status = 'done', processed = processed + 1, worker = $name` разом із
+результатом: якщо воркер упаде до `COMMIT`, лок зникне і задачу підбере інший. Порожня відповідь означає
+«вільних зараз немає», а не «черга порожня», тому воркер перепитує `count(*) WHERE status = 'pending'`
+і завершується лише коли він 0.
+
+`npm run demo:workers`: 40 задач `demo_email` плюс усе, що лежить у черзі `pending` (після `demo:race` — 10
+задач `order_confirmation`), 4 воркери в одному процесі, обробка задачі — 50 ms. Числа з запуску на чистій
+базі одразу після `demo:race`:
+
+| Метрика | Значення |
+| --- | --- |
+| задач оброблено | 50 (40 + 10 з `demo:race`) |
+| розподіл | worker-1 = 12, worker-2 = 13, worker-3 = 12, worker-4 = 13 |
+| оброблено двічі | 0 |
+| час | 734 ms проти 2 500 ms послідовно (50 × 50 ms) |
+
+### Retry на serialization failure
+
+`src/common/retry.ts` — `withRetry(fn)`: повторює **всю** транзакцію з початку, включно з читаннями, з
+експоненційним backoff і джитером, логуючи кожен повтор. Повторюються лише два SQLSTATE: `40001`
+(`serialization_failure`) і `40P01` (`deadlock_detected`). Це єдині помилки, якими Postgres каже
+«транзакція коректна, просто програла конкуренту — спробуй ще раз», і повтор має шанс пройти. Усе інше
+або детерміноване (порушення CHECK/UNIQUE, помилка синтаксису, `NOT FOUND` бізнес-логіки — повтор дасть
+той самий результат), або лишає стан невідомим (обрив зʼєднання: `COMMIT` міг пройти, і повтор
+подвоїть ефект). Повтор лише запису замість усієї транзакції — той самий lost update у профіль, бо
+прочитане значення вже застаріло.
+
+`npm run demo:retry`: 10 конкурентних транзакцій під `REPEATABLE READ` роблять read-modify-write балансу
+користувача `1` (+100 копійок кожна) з `pg_sleep` між читанням і записом, щоб конфлікт був гарантований.
+Числа з запуску: 39 повторів, усі `40001`; фінальний баланс = початковий + 1 000, перевіряється скриптом.
+Це навмисно «неправильний» патерн, щоб спровокувати помилку: у продакшн-коді для такого достатньо
+атомарного `UPDATE … SET balance_cents = balance_cents + 100`, як у checkout; retry потрібен там, де
+логіка справді мусить спершу прочитати.
 
 ## Grading
 
@@ -314,7 +409,8 @@ export SKIP_VAULT=1
 Дев-роль `marketplace_a` / `marketplace_dev` створює `db/init.sql` при першому старті тому; секретом вона
 не є. Далі — команди з acceptance criteria: `npm ci && npx tsc --noEmit`, `npm run build`, `npm run migrate`,
 `npm run migrate:show`, `npm run migrate:revert`, `npm run seed && npm run seed`, `npm run demo:nplus1`,
-`npm run report`. Міграції застосовуються на чисту базу: якщо в томі лишилась схема з `db/schema.sql`, спершу `docker compose down -v`.
+`npm run report`; ДЗ #14 (після `migrate` і `seed`): `npm run demo:race`, `npm run demo:workers`,
+`npm run demo:retry`. Міграції застосовуються на чисту базу: якщо в томі лишилась схема з `db/schema.sql`, спершу `docker compose down -v`.
 
 ## Перевірки
 
