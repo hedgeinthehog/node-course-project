@@ -1,0 +1,2 @@
+"pgbouncer" "pgbouncer_dev"
+"pgbouncer_admin" "pgbouncer_admin_dev"

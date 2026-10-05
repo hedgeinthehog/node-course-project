@@ -11,3 +11,5 @@ test
 spec.json
 db
 .github
+backups
+pgbouncer
