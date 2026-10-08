@@ -18,7 +18,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: docker compose up -d --wait
+      - run: docker compose up -d --wait postgres pgbouncer
       - run: npm ci
       - run: npx tsc --noEmit
       - run: npm run lint
@@ -31,5 +31,43 @@ jobs:
       - run: npm run demo:retry
       - run: bash scripts/with-secrets.sh dev bash scripts/backup.sh
       - run: bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
-      - run: npm run test:pact
       - run: npx redocly lint openapi/openapi.yaml
+
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:integration
+      - run: npm run test:e2e
+
+  contract:
+    runs-on: ubuntu-latest
+    env:
+      PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL || 'http://127.0.0.1:9292' }}
+      PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+      PACT_VERSION: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Start the compose Pact Broker when no external broker is configured
+        if: env.PACT_BROKER_URL == 'http://127.0.0.1:9292'
+        run: docker compose up -d --wait pact-broker
+      - name: Generate the consumer contract
+        run: npm run test:contract
+      - name: Publish the contract
+        run: bash scripts/pact-broker.sh publish
+      - name: Verify the provider and publish the result
+        run: npm run verify:provider
+      - name: Mark the verified provider version as prod
+        run: bash scripts/pact-broker.sh tag-prod
+      - name: can-i-deploy
+        run: bash scripts/pact-broker.sh can-i-deploy
