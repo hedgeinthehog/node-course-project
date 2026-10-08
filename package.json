@@ -7,7 +7,7 @@
   "license": "UNLICENSED",
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "format": "prettier --write \"src/**/*.ts\"",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "npm run build && node dist/main",
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
@@ -15,7 +15,6 @@
     "lint": "oxlint src/",
     "spec:lint": "redocly lint openapi/openapi.yaml",
     "spec:bundle": "redocly bundle openapi/openapi.yaml -o spec.json",
-    "test:pact": "node --test test/consumer.pact.test.mjs",
     "check:env": "npm run build && node scripts/check-env-example.mjs",
     "db:up": "docker compose up -d --wait",
     "db:down": "docker compose down -v",
@@ -31,7 +30,11 @@
     "demo:workers": "bash scripts/with-secrets.sh dev node dist/demo-workers.js",
     "demo:retry": "bash scripts/with-secrets.sh dev node dist/demo-retry.js",
     "backup": "bash scripts/with-secrets.sh dev bash scripts/backup.sh",
-    "restore:drill": "bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh"
+    "restore:drill": "bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh",
+    "test:integration": "node --experimental-vm-modules node_modules/jest/bin/jest.js --selectProjects integration",
+    "test:e2e": "node --experimental-vm-modules node_modules/jest/bin/jest.js --selectProjects e2e",
+    "test:contract": "node --experimental-vm-modules node_modules/jest/bin/jest.js --selectProjects contract",
+    "verify:provider": "node --experimental-vm-modules node_modules/jest/bin/jest.js --selectProjects provider"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.1",
@@ -49,13 +52,20 @@
   "devDependencies": {
     "@nestjs/cli": "^12.0.0",
     "@nestjs/schematics": "^12.0.0",
+    "@nestjs/testing": "^12.1.2",
     "@pact-foundation/pact": "^17.1.0",
     "@redocly/cli": "^2.46.0",
+    "@testcontainers/postgresql": "^12.2.0",
     "@types/express": "^5.0.0",
+    "@types/jest": "^30.0.0",
     "@types/node": "^24.0.0",
     "@types/pg": "^8.23.1",
+    "@types/supertest": "^7.2.1",
+    "jest": "^30.5.2",
     "oxlint": "^1.58.0",
     "prettier": "^3.4.2",
+    "supertest": "^7.3.1",
+    "ts-jest": "^29.4.14",
     "ts-loader": "^9.5.2",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.2"

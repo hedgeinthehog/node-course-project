@@ -12,6 +12,8 @@ export const envSchema = z.object({
       message: 'must not contain credentials, use DB_PASSWORD_FILE instead',
     }),
   DB_PASSWORD_FILE: z.string().min(1),
+  PACT_BROKER_URL: z.string().url().optional(),
+  PACT_BROKER_TOKEN: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

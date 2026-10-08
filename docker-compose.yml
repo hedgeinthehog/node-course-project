@@ -37,5 +37,28 @@ services:
       timeout: 3s
       retries: 15
 
+  pact-broker:
+    image: pactfoundation/pact-broker:3.0.0-pactbroker2.121.2
+    ports:
+      - '9292:9292'
+    environment:
+      PACT_BROKER_DATABASE_ADAPTER: sqlite
+      PACT_BROKER_DATABASE_NAME: /tmp/pact_broker.sqlite3
+      PACT_BROKER_LOG_LEVEL: WARN
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'wget',
+          '-q',
+          '--tries=1',
+          '-O',
+          '/dev/null',
+          'http://127.0.0.1:9292/diagnostic/status/heartbeat',
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
 volumes:
   pgdata:
