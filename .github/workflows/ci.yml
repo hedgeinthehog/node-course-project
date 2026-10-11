@@ -10,7 +10,7 @@ jobs:
       DB_HOST: 127.0.0.1
       DB_PORT: '6432'
       DB_USER: marketplace_a
-      DB_PASSWORD: marketplace_dev
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD || 'marketplace_dev' }}
       DB_NAME: marketplace
     steps:
       - uses: actions/checkout@v4
@@ -67,7 +67,14 @@ jobs:
         run: bash scripts/pact-broker.sh publish
       - name: Verify the provider and publish the result
         run: npm run verify:provider
-      - name: Mark the verified provider version as prod
-        run: bash scripts/pact-broker.sh tag-prod
-      - name: can-i-deploy
-        run: bash scripts/pact-broker.sh can-i-deploy
+      - name: Gate, can the provider go to prod
+        run: bash scripts/pact-broker.sh can-i-deploy marketplace-api
+      - name: Deploy the provider and record the deployment
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: bash scripts/pact-broker.sh record-deployment marketplace-api
+      - name: Gate, can the consumer go to prod
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: bash scripts/pact-broker.sh can-i-deploy marketplace-web
+      - name: Deploy the consumer and record the deployment
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: bash scripts/pact-broker.sh record-deployment marketplace-web

@@ -20,6 +20,7 @@ const project = (displayName, pattern, options) => ({
     ],
   },
   testMatch: [`<rootDir>/test/${pattern}`],
+  moduleNameMapper: { '^(\\.{1,2}/.*)\\.js$': '$1' },
   ...options,
 });
 

@@ -5,12 +5,12 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import type * as Pact from '@pact-foundation/pact';
 import { DataSource } from 'typeorm';
 import { seedDatabase } from '../../src/seed-data';
-import { createApp } from '../e2e/create-app';
 import { resetDatabase } from '../integration/testkit/database';
 
 declare const nativeRequire: NodeJS.Require;
 const { Verifier } = nativeRequire('@pact-foundation/pact') as typeof Pact;
 
+// Read before the app is loaded: importing AppModule makes ConfigModule load .env into process.env.
 const brokerUrl = process.env.PACT_BROKER_URL;
 const brokerToken = process.env.PACT_BROKER_TOKEN;
 
@@ -23,7 +23,9 @@ function providerVersion() {
       .toString()
       .trim();
   } catch {
-    return 'local';
+    throw new Error(
+      'PACT_VERSION is not set and there is no git checkout to derive the provider version from',
+    );
   }
 }
 
@@ -32,6 +34,7 @@ describe('marketplace-api provider verification', () => {
   let dataSource: DataSource;
 
   beforeAll(async () => {
+    const { createApp } = await import('../e2e/create-app.js');
     app = await createApp();
     await app.listen(0, '127.0.0.1');
     dataSource = app.get(DataSource);

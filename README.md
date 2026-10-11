@@ -642,7 +642,8 @@ interactions з provider states — `GET /orders/1` (`order 1 exists`), `GET /or
 | `bash scripts/with-secrets.sh dev npm run verify:provider` | **основний шлях**: обгортка бере `PACT_BROKER_URL` / `PACT_BROKER_TOKEN` зі сховища ДЗ #11 (локальний `.env`), контракт береться з брокера, результат публікується (`publishVerificationResult: true`) |
 | `PACT_BROKER_URL=http://127.0.0.1:9292 npm run verify:provider` | **аварійна форма для грейдера** без доступу до сховища; під `SKIP_VAULT=1` обгортка виконує рівно її |
 
-Версія провайдера — `PACT_VERSION`, а якщо її немає — `git rev-parse --short HEAD`.
+Версія провайдера — `PACT_VERSION`, а якщо її немає — `git rev-parse --short HEAD`; поза git-чекаутом і без
+`PACT_VERSION` і `verify:provider` у режимі брокера, і `scripts/pact-broker.sh` зупиняються з поясненням.
 
 ### Брокер локально і гейт can-i-deploy
 
@@ -680,18 +681,32 @@ curl -s "$PACT_BROKER_URL/can-i-deploy?pacticipant=marketplace-web&version=$VERS
 ```
 
 Тег `prod` ставиться на версію **провайдера** — ту саму, яку `verify:provider` передав як
-`providerVersion`. Повторна публікація того самого контракту дає `200`, а не `201`; щоб повторити
+`providerVersion`; у цій послідовності крок із тегом імітує деплой провайдера (у CI це окремий крок
+`record-deployment`, який виконується лише після гейта). Повторна публікація того самого контракту дає `200`, а не `201`; щоб повторити
 послідовність із чистого стану, перестворіть брокер: `docker compose up -d --force-recreate --wait pact-broker`.
 
 ### CI
 
-`.github/workflows/ci.yml`: job `tests` — `test:integration` і `test:e2e`; job `contract` — `test:contract`
-→ публікація контракту → `verify:provider` з публікацією результату → тег `prod` на перевірену версію
-провайдера → `can-i-deploy`, який валить job, якщо `deployable` не `true`. Кроки брокера —
-`scripts/pact-broker.sh publish | tag-prod | can-i-deploy` (ті самі запити, що вище). `PACT_BROKER_URL` і
-`PACT_BROKER_TOKEN` приходять із secrets GitHub; якщо їх немає, job піднімає compose-брокер і працює з ним.
-У справжньому pipeline тег `prod` ставив би крок деплою провайдера, а не той самий job. Workflow локально
-не запускався.
+`.github/workflows/ci.yml`: job `tests` — `test:integration` і `test:e2e`; job `contract` — pipeline контракту,
+де кожен тег ставить крок деплою, а не крок перевірки:
+
+1. `test:contract` → публікація контракту (`scripts/pact-broker.sh publish`);
+2. `verify:provider` з публікацією результату;
+3. **гейт провайдера** — `can-i-deploy marketplace-api … to=prod`: чи сумісна ця версія провайдера з
+   консюмерами, що зараз у prod; job падає, якщо `deployable` не `true`;
+4. тільки на `push` у `master`: **деплой провайдера** (імітований) і `record-deployment marketplace-api` —
+   саме цей крок ставить тег `prod`;
+5. тільки на `master`: **гейт консюмера** — `can-i-deploy marketplace-web … to=prod` проти провайдера, що
+   тепер у prod; далі деплой консюмера і його `record-deployment`.
+
+`PACT_BROKER_URL` і `PACT_BROKER_TOKEN` приходять із secrets GitHub; без них job піднімає compose-брокер і
+працює з ним. На порожньому брокері гейт провайдера проходить з причиною «немає залежностей» — це штатний
+bootstrap, провайдер деплоїться першим; змістовним гейт стає з постійним брокером, де теги `prod` лишаються
+між прогонами: тоді гейт консюмера на `master` порівнює контракт із тим провайдером, який справді у prod, а
+гейт провайдера на кожному PR — з консюмерами у prod. Перевірено локально на тій самій послідовності:
+гейт консюмера до деплою провайдера — `unknown`, після — `true`; контракт, який провайдер порушує, валить
+`verify:provider`, а його гейт лишається `null`. Пароль дев-бази в job `db` теж береться зі secrets
+(`DB_PASSWORD`, за замовчуванням дев-значення стенда). Workflow локально не запускався.
 
 ## Grading
 
@@ -705,7 +720,9 @@ bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
 
 `DB_HOST`/`DB_PORT` — це PgBouncer (`127.0.0.1:6432`), не Postgres напряму; у формі URL це
 `postgres://marketplace_a:marketplace_dev@127.0.0.1:6432/marketplace`. Дев-роль `marketplace_a` /
-`marketplace_dev` створює `db/init.sql` при першому старті тому; секретом вона не є. `SKIP_VAULT=1`
+`marketplace_dev` створює `db/init.sql` при першому старті тому; секретом вона не є. Пароль ролей застосунку
+можна задати змінною `DB_PASSWORD` під час першого `docker compose up` (compose передає її в
+`APP_DB_PASSWORD`, `init.sql` читає її через `\set`) — так робить CI зі своїх secrets. `SKIP_VAULT=1`
 потрібен, бо сховище грейдеру недоступне: обгортка тоді просто виконує команду з уже заданим оточенням.
 `scripts/backup.sh` і `scripts/restore-drill.sh` читають `DB_*` прямо з оточення, тому після двох `export`
 працює й форма без обгортки (`bash scripts/backup.sh`). `backup.sh` перевіряє `DB_HOST:DB_PORT` справжнім
