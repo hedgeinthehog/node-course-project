@@ -125,7 +125,7 @@ docker build -t myapp . && docker run --rm myapp ls -a /app && docker run --rm m
 | Ресурс | Операції |
 | --- | --- |
 | `/products` | `GET /products` (cursor-пагінація), `POST /products` (Idempotency-Key), `GET /products/{id}` |
-| `/orders` | `GET /orders` (cursor-пагінація), `POST /orders` (Idempotency-Key), `GET /orders/{id}` |
+| `/orders` | `GET /orders` (cursor-пагінація), `POST /orders` (Idempotency-Key), `GET /orders/{id}`, `PATCH /orders/{id}/status` (життєвий цикл), `GET /orders/{id}/events` (SSE) |
 
 - **Cursor-пагінація**: `?limit=&cursor=`, відповідь `{ items, next_cursor }`, `next_cursor: null` — сторінок більше немає. Курсор — непрозорий токен.
 - **Idempotency-Key**: обовʼязковий header на обох POST. Той самий ключ + те саме тіло → та сама відповідь `201` + `Idempotency-Replay: true`; той самий ключ + інше тіло → `422`.
@@ -708,6 +708,132 @@ bootstrap, провайдер деплоїться першим; змістов�
 `verify:provider`, а його гейт лишається `null`. Пароль дев-бази в job `db` теж береться зі secrets
 (`DB_PASSWORD`, за замовчуванням дев-значення стенда). Workflow локально не запускався.
 
+## Realtime: статус замовлення без перезавантаження
+
+Життєвий цикл замовлення: `pending → paid → processing → shipped → out_for_delivery → delivered`,
+`cancelled` дозволений з `pending`, `paid` і `processing`; `delivered` і `cancelled` — кінцеві. Checkout
+створює замовлення одразу `paid`, далі статус змінює `PATCH /orders/{id}/status` з тілом `{ "status": … }`:
+один крок циклу в транзакції (рядок замовлення під `FOR UPDATE`), недозволений перехід — `409` problem+json.
+
+Подія «статус змінився» народжується в бізнес-логіці (`OrdersService.changeStatus`), а не в контролері, і
+йде в одну шину — `OrderEventsService` (`src/orders/order-events.service.ts`): RxJS `Subject` плюс буфер
+останніх 100 подій на замовлення з номерами `id`, що зростають на одиницю; буфери тримаються для останніх
+10 000 замовлень, старіші витісняються. З цієї шини подію забирають два
+транспорти:
+
+- **WebSocket** (`src/orders/orders.gateway.ts`, socket.io на тому самому порту): клієнт підключається з
+  `auth: { userId }`, шле `join` з `{ orderId }` і отримує ack. Сервер кладе сокет у кімнату `orders:<id>`
+  лише якщо замовлення належить цьому користувачу; анонімному (`unauthenticated`) або чужому
+  (`forbidden`) — відмова в ack. Подія `order.status` емітиться через `server.to('orders:<id>')`, тобто
+  тільки в кімнату цього замовлення.
+- **SSE** — `GET /orders/{id}/events`, `content-type: text/event-stream`. Потік починається з
+  `retry: 1000`, кожна подія — блок `event: order.status`, `id: <n>`, `data: <OrderStatusEvent JSON>`;
+  раз на 15 секунд іде коментар `: ping`. Нове підключення без `Last-Event-ID` отримує всі події з буфера,
+  реконект із `Last-Event-ID: N` — лише події з `id > N`, далі живі. Невідоме замовлення — `404` до відкриття
+  потоку.
+
+Поки в API немає автентифікації (вона з'явиться на Лекції 24), власника для WebSocket називає клієнт у
+handshake, так само як `user_id` у тілі `POST /orders`; SSE і `GET /orders/{id}` відкриті, як і решта
+REST-ресурсів.
+
+Запуск і перевірка (застосунок на `http://localhost:3000`; перші два рядки — локальне сховище з ДЗ #11,
+пропустіть їх, якщо `.env` і `secrets/db_password` уже є):
+
+```bash
+cp .env.example .env
+cp secrets/db_password.example secrets/db_password
+npm ci && npm run db:up && npm run build && npm run migrate && npm run seed && npm start
+```
+
+У другому терміналі створіть замовлення й змінюйте статус:
+
+```bash
+curl -s -X POST localhost:3000/orders -H 'Content-Type: application/json' -H "Idempotency-Key: order-$(date +%s)" -d '{"user_id":1,"items":[{"product_id":2,"quantity":1}]}'
+```
+
+```bash
+for s in processing shipped out_for_delivery delivered; do curl -s -X PATCH localhost:3000/orders/<id>/status -H 'Content-Type: application/json' -d "{\"status\":\"$s\"}"; echo; done
+```
+
+SSE-заголовок, формат подій і відновлення після `Last-Event-ID: 3` (чотири зміни вище дають події 1..4,
+тож перший `id:` у відповіді — `4`):
+
+```bash
+curl -sN --max-time 2 -D - -o /dev/null localhost:3000/orders/<id>/events | grep -i '^content-type'
+```
+
+```bash
+curl -sN --max-time 5 localhost:3000/orders/<id>/events
+```
+
+```bash
+curl -sN --max-time 2 -H 'Last-Event-ID: 3' localhost:3000/orders/<id>/events | grep '^id:' | head -1
+```
+
+Headless-демо ізоляції кімнат — `scripts/realtime-demo.mjs` (`socket.io-client`). Скрипт сам створює два
+замовлення (покупці 1 і 2, перший товар зі stock > 0), підключає двох клієнтів, чекає ack на `join`,
+змінює статус замовлення A через `PATCH` і друкує `A_RECEIVED` / `B_RECEIVED`. Основний прогін — клієнти в
+різних кімнатах, контрольний `--same-room` — обидва в кімнаті замовлення A (другий клієнт тоді заходить як
+власник A); код виходу 0 лише якщо результат збігся з очікуванням режиму. Той самий код, різниця лише в
+прапорці. Адреса застосунку — `API_URL` (за замовчуванням `http://localhost:3000`).
+
+```bash
+node scripts/realtime-demo.mjs; echo "exit=$?"
+```
+
+```bash
+node scripts/realtime-demo.mjs --same-room; echo "exit=$?"
+```
+
+Вивід із прогону:
+
+```
+FOREIGN_JOIN=refused
+ANONYMOUS_JOIN=refused
+MODE=separate-rooms ORDER_A=64 ROOM_B=orders:65
+A_RECEIVED=1
+B_RECEIVED=0
+ROOM_ISOLATION=ok
+exit=0
+```
+
+```
+ANONYMOUS_JOIN=refused
+MODE=same-room ORDER_A=66 ROOM_B=orders:66
+A_RECEIVED=1
+B_RECEIVED=1
+ROOM_ISOLATION=ok
+exit=0
+```
+
+Те саме покриває `test/e2e/realtime.e2e-spec.ts`: переходи й `409`, SSE з `Last-Event-ID`, кімнати з
+перевіркою власника.
+
+**Два інстанси.** Кімнати socket.io і буфер подій живуть у памʼяті одного процесу: за двома інстансами за
+балансувальником клієнт, підключений до інстанса 1, не почує подію, яку опублікував інстанс 2, а SSE-реконект
+на інший інстанс не знайде пропущених подій. Лікується Redis-адаптером socket.io (`@socket.io/redis-adapter`,
+кімнати стають спільними через pub/sub) і винесенням буфера подій у спільне сховище, наприклад Redis Streams
+(Лекція 23). Той самий in-memory буфер скидається з рестартом процесу і не знає про пересів бази: номери
+подій прив'язані до `id` замовлення, тому після `down -v` і повторного seed старі події можуть «приклеїтись»
+до нового замовлення з тим самим `id`.
+
+## Trade-offs: WebSocket vs SSE
+
+| Критерій | WebSocket (socket.io) | SSE |
+| --- | --- | --- |
+| Напрям каналу | двонаправлений: клієнт шле `join`, сервер — події | лише сервер → клієнт; команди йдуть окремими HTTP-запитами |
+| Реконект і відновлення | реконект робить socket.io-client, але пропущені події не відновлюються самі — потрібен власний протокол (повторний `join`, свій курсор) | вбудовано в протокол: браузер сам перепідключається (`retry:`) і шле `Last-Event-ID`, сервер дограє пропущене з буфера |
+| Вимоги до інфраструктури | upgrade до WS на проксі/балансувальнику, sticky sessions або Redis-адаптер для кількох інстансів | звичайний HTTP/1.1 keep-alive, проходить крізь будь-який проксі; треба лише вимкнути буферизацію відповіді |
+| Ціна на подію | мінімальна: фрейм без HTTP-заголовків, одне зʼєднання на багато кімнат | текстовий блок на зʼєднання; одне зʼєднання на один ресурс, у браузері ліміт зʼєднань на HTTP/1.1 |
+| Формат | будь-який (бінарний теж), довільні імена подій | тільки текст у UTF-8 |
+| Авторизація підписки | природно: `join` з перевіркою власника в handler-і | заголовки першого запиту; без auth у проєкті потік відкритий, як і `GET /orders/{id}` |
+
+Для нотифікацій «статус замовлення змінився» у проді я лишив би **SSE**: потік тут строго односпрямований,
+відновлення після обриву потрібне (покупець не має пропустити «доставлено»), і протокол дає його безкоштовно
+разом із `Last-Event-ID`, а інфраструктурно це звичайний HTTP без sticky sessions і Redis-адаптера. WebSocket
+виправданий там, де клієнт теж шле потік повідомлень — чат із продавцем або живий кошик, — і тоді один
+socket.io-канал закриє обидва напрямки.
+
 ## Grading
 
 ```bash
@@ -741,6 +867,9 @@ bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
 ДЗ #16 (потрібен лише запущений Docker, базу піднімає testcontainers): `npm ci && npx tsc --noEmit`,
 `npm run test:integration`, `npm run test:e2e`, `npm run test:contract`, `npm run verify:provider`;
 послідовність гейта з брокером — у «Тестування → Брокер локально і гейт can-i-deploy».
+
+ДЗ #18 (застосунок піднятий за інструкцією з «Realtime», `localhost:3000`): команди з `curl` для SSE,
+`Last-Event-ID` і два прогони `node scripts/realtime-demo.mjs` / `--same-room` — у тому ж розділі.
 
 ## Перевірки
 
