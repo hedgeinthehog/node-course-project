@@ -288,6 +288,102 @@ paths:
         default:
           $ref: '#/components/responses/UnexpectedError'
 
+  /orders/{id}/status:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    patch:
+      tags: [orders]
+      operationId: changeOrderStatus
+      summary: Move an order to the next lifecycle status
+      description: >-
+        Applies one transition of the order lifecycle inside a transaction (the order row is locked
+        with FOR UPDATE). A successful change publishes an `order.status` event to the WebSocket room
+        `orders:{id}` and to the SSE stream of this order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangeOrderStatus'
+            examples:
+              ship:
+                value: { status: shipped }
+      responses:
+        '200':
+          description: The order with its new status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The transition is not allowed from the current status.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+
+  /orders/{id}/events:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [orders]
+      operationId: streamOrderEvents
+      summary: Server-sent events with status changes of an order
+      description: >-
+        Long-lived `text/event-stream`, available only to the owner of the order (`X-User-Id`). The
+        stream opens with `retry: 1000`; every status change arrives as `event: order.status` with a
+        per-order `id:` that grows by one and an OrderStatusEvent JSON in `data:`; a `: ping` comment
+        every 15 seconds keeps idle connections alive. Events are stored in the `order_events` table, so
+        the numbering survives restarts and a client that reconnects with `Last-Event-ID` first receives
+        the events it missed.
+      parameters:
+        - name: X-User-Id
+          in: header
+          required: true
+          description: >-
+            Id of the user reading the stream. Until real authentication exists the client names itself,
+            the same way `user_id` is sent in the order body; the stream is served only when this user
+            owns the order (403 otherwise).
+          schema:
+            type: integer
+            minimum: 1
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: Id of the last event the client has seen; buffered events with greater ids are replayed first.
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        '200':
+          description: Event stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              example: |
+                event: order.status
+                id: 4
+                data: {"id":4,"orderId":11,"status":"delivered","previous":"out_for_delivery","at":"2026-10-11T19:00:00.000Z"}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: The order belongs to another user.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+
 components:
   parameters:
     Id:
@@ -485,9 +581,43 @@ components:
           minimum: 0
           description: Order total in integer cents.
         status:
-          type: string
-          enum: [pending, paid, cancelled]
+          $ref: '#/components/schemas/OrderStatus'
         created_at:
+          type: string
+          format: date-time
+
+    OrderStatus:
+      type: string
+      enum: [pending, paid, processing, shipped, out_for_delivery, delivered, cancelled]
+      description: >-
+        Lifecycle: pending → paid → processing → shipped → out_for_delivery → delivered;
+        cancelled is allowed from pending, paid and processing. delivered and cancelled are final.
+
+    ChangeOrderStatus:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+
+    OrderStatusEvent:
+      type: object
+      additionalProperties: false
+      required: [id, orderId, status, previous, at]
+      description: Payload of an `order.status` event (SSE `data:` line and the WebSocket message).
+      properties:
+        id:
+          type: integer
+          minimum: 1
+          description: Per-order event number; grows by one with every status change and is persisted, so it never restarts from 1.
+        orderId:
+          type: integer
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        previous:
+          $ref: '#/components/schemas/OrderStatus'
+        at:
           type: string
           format: date-time
 

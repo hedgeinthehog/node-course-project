@@ -8,9 +8,12 @@ import { DataSource, MoreThan, Repository } from 'typeorm';
 import { checkout, CheckoutError } from '../checkout/checkout';
 import { IdempotencyStore } from '../common/idempotency';
 import { buildPage, decodeCursor, Page } from '../common/pagination';
+import { OrderItem } from '../entities/order-item.entity';
 import { Order } from '../entities/order.entity';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { OrderDto, toOrderDto } from './dto/order.dto';
+import { OrderEventsService } from './order-events.service';
+import { canTransition, OrderStatus } from './order-status';
 
 @Injectable()
 export class OrdersService {
@@ -20,6 +23,7 @@ export class OrdersService {
     @InjectRepository(Order)
     private readonly orders: Repository<Order>,
     private readonly dataSource: DataSource,
+    private readonly events: OrderEventsService,
   ) {}
 
   create(key: string, dto: CreateOrderDto) {
@@ -53,6 +57,36 @@ export class OrdersService {
       relations: { items: true },
     });
     return buildPage(rows.map(toOrderDto), limit);
+  }
+
+  async changeStatus(id: string, next: OrderStatus): Promise<OrderDto> {
+    const { order, event } = await this.dataSource.transaction(
+      async (manager) => {
+        const order = await manager.findOne(Order, {
+          where: { id },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!order) {
+          throw new NotFoundException(`Order ${id} not found`);
+        }
+        if (!canTransition(order.status, next)) {
+          throw new ConflictException(
+            `Order ${id}: cannot change status from ${order.status} to ${next}`,
+          );
+        }
+        const previous = order.status;
+        await manager.update(Order, id, { status: next });
+        order.status = next;
+        order.items = await manager.findBy(OrderItem, { orderId: id });
+        const event = await this.events.record(manager, id, {
+          status: next,
+          previous,
+        });
+        return { order, event };
+      },
+    );
+    this.events.publish(event);
+    return toOrderDto(order);
   }
 
   async findOne(id: string): Promise<OrderDto> {

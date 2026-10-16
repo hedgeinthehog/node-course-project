@@ -1,11 +1,12 @@
 import { Order } from '../../entities/order.entity';
+import { OrderStatus } from '../order-status';
 
 export interface OrderDto {
   id: number;
   user_id: number;
   items: { product_id: number; quantity: number }[];
   total_cents: number;
-  status: Order['status'];
+  status: OrderStatus;
   created_at: string;
 }
 
