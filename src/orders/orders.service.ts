@@ -60,7 +60,7 @@ export class OrdersService {
   }
 
   async changeStatus(id: string, next: OrderStatus): Promise<OrderDto> {
-    const { order, previous } = await this.dataSource.transaction(
+    const { order, event } = await this.dataSource.transaction(
       async (manager) => {
         const order = await manager.findOne(Order, {
           where: { id },
@@ -78,10 +78,14 @@ export class OrdersService {
         await manager.update(Order, id, { status: next });
         order.status = next;
         order.items = await manager.findBy(OrderItem, { orderId: id });
-        return { order, previous };
+        const event = await this.events.record(manager, id, {
+          status: next,
+          previous,
+        });
+        return { order, event };
       },
     );
-    this.events.publish(Number(order.id), { status: order.status, previous });
+    this.events.publish(event);
     return toOrderDto(order);
   }
 

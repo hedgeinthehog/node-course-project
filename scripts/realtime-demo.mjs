@@ -44,14 +44,18 @@ function connect(userId) {
 
 function join(client, orderId) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error(`join ${orderId}: no ack`)),
-      3000,
-    );
-    client.emit('join', { orderId }, (ack) => {
+    const finish = (result) => {
       clearTimeout(timer);
-      resolve(ack);
-    });
+      client.off('exception', onRefusal);
+      resolve(result);
+    };
+    const onRefusal = (refusal) => finish(refusal);
+    const timer = setTimeout(() => {
+      client.off('exception', onRefusal);
+      reject(new Error(`join ${orderId}: no ack`));
+    }, 3000);
+    client.once('exception', onRefusal);
+    client.emit('join', { orderId }, finish);
   });
 }
 

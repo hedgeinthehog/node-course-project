@@ -8,12 +8,14 @@ import {
   Post,
   Query,
   Res,
+  UseGuards,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { OrdersService } from './orders.service';
 import type { CreateOrderDto } from './dto/create-order.dto';
 import type { ChangeOrderStatusDto } from './dto/change-order-status.dto';
 import { OrderEventsService } from './order-events.service';
+import { OrderOwnerGuard } from './order-owner.guard';
 
 @Controller('orders')
 export class OrdersController {
@@ -51,12 +53,12 @@ export class OrdersController {
   }
 
   @Get(':id/events')
-  async streamEvents(
+  @UseGuards(OrderOwnerGuard)
+  streamEvents(
     @Param('id') id: string,
     @Headers('last-event-id') lastEventId: string | undefined,
     @Res() res: Response,
   ) {
-    await this.ordersService.findOne(id);
     const afterId = Number(lastEventId) || 0;
 
     res.writeHead(200, {

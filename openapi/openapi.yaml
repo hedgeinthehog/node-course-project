@@ -336,11 +336,23 @@ paths:
       operationId: streamOrderEvents
       summary: Server-sent events with status changes of an order
       description: >-
-        Long-lived `text/event-stream`. The stream opens with `retry: 1000`; every status change
-        arrives as `event: order.status` with a per-order increasing `id:` and an OrderStatusEvent JSON
-        in `data:`; a `: ping` comment every 15 seconds keeps idle connections alive. Events are kept in an in-memory buffer (last 100 per order),
-        so a client that reconnects with `Last-Event-ID` first receives the events it missed.
+        Long-lived `text/event-stream`, available only to the owner of the order (`X-User-Id`). The
+        stream opens with `retry: 1000`; every status change arrives as `event: order.status` with a
+        per-order `id:` that grows by one and an OrderStatusEvent JSON in `data:`; a `: ping` comment
+        every 15 seconds keeps idle connections alive. Events are stored in the `order_events` table, so
+        the numbering survives restarts and a client that reconnects with `Last-Event-ID` first receives
+        the events it missed.
       parameters:
+        - name: X-User-Id
+          in: header
+          required: true
+          description: >-
+            Id of the user reading the stream. Until real authentication exists the client names itself,
+            the same way `user_id` is sent in the order body; the stream is served only when this user
+            owns the order (403 otherwise).
+          schema:
+            type: integer
+            minimum: 1
         - name: Last-Event-ID
           in: header
           required: false
@@ -361,6 +373,12 @@ paths:
                 data: {"id":4,"orderId":11,"status":"delivered","previous":"out_for_delivery","at":"2026-10-11T19:00:00.000Z"}
         '400':
           $ref: '#/components/responses/BadRequest'
+        '403':
+          description: The order belongs to another user.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
         '404':
           $ref: '#/components/responses/NotFound'
         default:
@@ -592,7 +610,7 @@ components:
         id:
           type: integer
           minimum: 1
-          description: Per-order event number; grows by one with every status change.
+          description: Per-order event number; grows by one with every status change and is persisted, so it never restarts from 1.
         orderId:
           type: integer
         status:

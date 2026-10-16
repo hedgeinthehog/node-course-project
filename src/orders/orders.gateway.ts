@@ -1,5 +1,4 @@
-import { OnModuleDestroy } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
+import { OnModuleDestroy, UseGuards } from '@nestjs/common';
 import {
   ConnectedSocket,
   MessageBody,
@@ -10,17 +9,10 @@ import {
 } from '@nestjs/websockets';
 import { Subscription } from 'rxjs';
 import { Server, Socket } from 'socket.io';
-import { Repository } from 'typeorm';
-import { Order } from '../entities/order.entity';
 import { OrderEventsService } from './order-events.service';
+import { OrderOwnerGuard } from './order-owner.guard';
 
 export const orderRoom = (orderId: number | string) => `orders:${orderId}`;
-
-interface JoinAck {
-  ok: boolean;
-  room?: string;
-  error?: string;
-}
 
 @WebSocketGateway({ cors: { origin: '*' } })
 export class OrdersGateway implements OnGatewayInit, OnModuleDestroy {
@@ -29,11 +21,7 @@ export class OrdersGateway implements OnGatewayInit, OnModuleDestroy {
 
   private subscription?: Subscription;
 
-  constructor(
-    private readonly events: OrderEventsService,
-    @InjectRepository(Order)
-    private readonly orders: Repository<Order>,
-  ) {}
+  constructor(private readonly events: OrderEventsService) {}
 
   afterInit() {
     this.subscription = this.events.all().subscribe((event) => {
@@ -45,24 +33,14 @@ export class OrdersGateway implements OnGatewayInit, OnModuleDestroy {
     this.subscription?.unsubscribe();
   }
 
+  @UseGuards(OrderOwnerGuard)
   @SubscribeMessage('join')
   async join(
     @ConnectedSocket() client: Socket,
-    @MessageBody() body: { orderId?: number | string } | undefined,
-  ): Promise<JoinAck> {
-    const userId = client.handshake.auth?.userId;
-    if (userId === undefined || userId === null || userId === '') {
-      return { ok: false, error: 'unauthenticated' };
-    }
-    const orderId = String(body?.orderId ?? '');
-    if (!/^\d+$/.test(orderId)) {
-      return { ok: false, error: 'invalid order id' };
-    }
-    const order = await this.orders.findOneBy({ id: orderId });
-    if (!order || order.userId !== String(userId)) {
-      return { ok: false, error: 'forbidden' };
-    }
-    await client.join(orderRoom(orderId));
-    return { ok: true, room: orderRoom(orderId) };
+    @MessageBody() body: { orderId: number | string },
+  ) {
+    const room = orderRoom(body.orderId);
+    await client.join(room);
+    return { ok: true, room };
   }
 }
