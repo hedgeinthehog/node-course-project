@@ -10,11 +10,11 @@
 
 Сам сервер — NestJS, дані в Postgres через TypeORM-репозиторії (`src/entities/`, ДЗ #13); на кордоні стоїть
 `express-openapi-validator` (запити й відповіді звіряються зі спекою, помилки віддаються як
-`application/problem+json`).
+`application/problem+json`). Події домену йдуть у RabbitMQ (ДЗ #19, розділ «Async-події через RabbitMQ»).
 
 ## Вимоги
 
-Node.js ≥ 22.12.0, Docker з Compose (для Postgres, образу й тестів на testcontainers).
+Node.js ≥ 22.12.0, Docker з Compose (для Postgres, RabbitMQ, образу й тестів на testcontainers).
 
 ## Запуск
 
@@ -23,11 +23,19 @@ npm install
 cp .env.example .env
 cp secrets/db_password.example secrets/db_password
 npm run db:up
-npm run build && npm run migrate && npm run seed
+npm run build && npm run migrate && npm run events:topology && npm run seed
 npm start
 ```
 
-Сервер слухає `http://localhost:3000`. Порт задається змінною `PORT`:
+Сервер слухає `http://localhost:3000`. Споживач подій `order.placed` — окремий процес, у другому терміналі
+(він же оголошує топологію брокера при старті, тож `events:topology` потрібен лише щоб API стартував раніше за
+споживача):
+
+```bash
+npm run consume
+```
+
+Порт API задається змінною `PORT`:
 
 ```bash
 PORT=8080 npm start
@@ -46,20 +54,28 @@ PORT=8080 npm start
 | `PORT` | ні | `3000` | HTTP-порт API | `.env` (dev) / env оточення (prod) |
 | `DB_URL` | так | — | URL **PgBouncer** (не Postgres напряму) **без облікових даних**, напр. `postgres://localhost:6432/marketplace` | сховище: локальний `.env` поза git (dev), env оточення платформи (prod) |
 | `DB_PASSWORD_FILE` | так | — | шлях до файла-секрета формату `user:password`, напр. `secrets/db_password` | сховище: файл-секрет поза git, ротується `rotate.sh`; шаблон — `secrets/db_password.example` |
+| `BROKER_URL` | так | — | AMQP-URL RabbitMQ **з обліковими даними**, напр. `amqp://marketplace:marketplace_dev@localhost:5672`; читають API (публікація `order.placed`), споживач і демо ДЗ #19 | сховище: локальний `.env` поза git (dev), env оточення платформи (prod); у `.env.example` — дев-користувач стенда, він не секрет |
 | `PACT_BROKER_URL` | ні | — | адреса Pact Broker для контрактних тестів (`http://127.0.0.1:9292` для compose); застосунок її не використовує, читає лише тестовий код | сховище: локальний `.env` поза git (dev), secrets GitHub (CI) |
 | `PACT_BROKER_TOKEN` | ні | — | bearer-токен брокера; для локального compose-брокера порожній | сховище: локальний `.env` поза git (dev), secrets GitHub (CI) |
 
 Контракт змінних — `.env.example` (у git). Реальний `.env` і тека `secrets/` — у `.gitignore`
 та `.dockerignore`, у docker-образ вони не потрапляють.
 
+На відміну від `DB_URL`, `BROKER_URL` несе облікові дані в собі: amqplib бере їх з URL, ротації без рестарту
+для брокера не вимагалось, а значення живе лише у сховищі — у git є тільки `.env.example` із дев-користувачем
+compose (`marketplace` / `marketplace_dev`), таким самим «не секретом», як `marketplace_a` / `marketplace_dev`
+у `secrets/db_password.example`.
+
 Облікові дані БД застосунок читає не з env, а з файла `DB_PASSWORD_FILE` у форматі `user:password`:
 пул `pg.Pool` створює зʼєднання через власний `Client`, який перечитує файл на кожне нове зʼєднання.
 Тому і користувача, і пароль можна ротувати без рестарту.
 
 Стенд для локального запуску — `docker-compose.yml`: Postgres (порт хоста `5433` — лише для прямого
-адмін-доступу) і PgBouncer перед ним (порт хоста `6432` — сюди ходить застосунок, див. «Data layer ops»;
-`npm run db:up` чекає на healthcheck обох сервісів, тож `npm run db:up && npm start` не
-стартує раніше за готовність БД). `db/init.sql` створює дві рівноправні login-ролі `marketplace_a`
+адмін-доступу), PgBouncer перед ним (порт хоста `6432` — сюди ходить застосунок, див. «Data layer ops»),
+Pact Broker (`9292`, див. «Тестування») і RabbitMQ 4.2 (`5672` — AMQP, `15672` — вебморда менеджменту; healthcheck
+— `rabbitmq-diagnostics -q check_running`, бо між відкриттям TCP-порту і готовністю Erlang-ноди приймати
+`basic.publish` є вікно, у якому клієнт ловить `ECONNRESET`). `npm run db:up` чекає на healthcheck усіх сервісів,
+тож `npm run db:up && npm start` не стартує раніше за готовність стенда. `db/init.sql` створює дві рівноправні login-ролі `marketplace_a`
 і `marketplace_b` (обидві — члени групової ролі `marketplace`, власника бази) зі стартовим паролем
 `marketplace_dev`. Стартовий вміст файла-секрета — `marketplace_a:marketplace_dev`. Після
 `npm run db:down` (`docker compose down -v`) база повертається до стартового пароля, а файл
@@ -257,7 +273,8 @@ jobs `tests` і `contract` описані в «Тестування»). Сам w
 
 `src/data-source.ts` не містить хоста чи пароля і не читає env-файлів: `DB_HOST`, `DB_PORT`, `DB_USER`,
 `DB_PASSWORD`, `DB_NAME` беруться з `process.env` і валідуються zod-схемою `src/config/db-env.schema.ts`
-(це єдине місце поза `ConfigService`, де читається `process.env`, — CLI TypeORM працює без Nest).
+(поза `ConfigService` `process.env` читають лише скрипти без Nest: CLI TypeORM через цю схему, споживач і
+демо ДЗ #19 — через `parseBrokerUrl` із `src/config/env.schema.ts` для `BROKER_URL`).
 Оточення наповнює `scripts/with-secrets.sh <env> <команда>`: з Infisical (`infisical run`), якщо є
 `.secrets/infisical.env`, інакше — зі сховища ДЗ #11: хост, порт і база з `DB_URL` у локальному `.env`,
 користувач і пароль з файла-секрета `DB_PASSWORD_FILE`. Гілку Infisical не перевірено — проєкту в Infisical
@@ -273,6 +290,7 @@ jobs `tests` і `contract` описані в «Тестування»). Сам w
 | --- | --- | --- |
 | `order_items.order_id → orders` | `CASCADE` | позиції не існують без замовлення, це частина агрегата |
 | `order_events.order_id → orders` | `CASCADE` | історія статусів — частина того самого агрегата (ДЗ #18) |
+| `shipments.order_id → orders` | `CASCADE` | відправлення — наслідок замовлення, без нього не існує (ДЗ #19) |
 | `order_items.product_id → products` | `RESTRICT` | проданий товар не можна видалити — історію захищено; товар архівують через `status` |
 | `orders.user_id → users` | `RESTRICT` | замовлення — фінансова історія, користувача з замовленнями не видаляють |
 | `products.seller_id → users` | `RESTRICT` | каталог не зникає разом із продавцем мовчки |
@@ -436,7 +454,8 @@ UPDATE чекає на ньому, а після `COMMIT` першого Postgre
 docker compose up -d --wait
 ```
 
-Піднімає Postgres 17 і PgBouncer 1.26 (`edoburu/pgbouncer`), чекає healthcheck обох. Healthcheck пулера —
+Піднімає Postgres 17, PgBouncer 1.26 (`edoburu/pgbouncer`), Pact Broker і RabbitMQ 4.2, чекає healthcheck усіх
+чотирьох. Healthcheck пулера —
 справжній запит `SELECT 1` крізь PgBouncer у базу, тож «healthy» означає, що шлях до Postgres працює.
 Порти хоста: `6432` — PgBouncer (сюди вказують `DB_URL` у `.env.example` і `DB_PORT` у «Grading»),
 `5433` — Postgres напряму, лише для адміністратора.
@@ -562,13 +581,13 @@ cp secrets/db_password.example secrets/db_password
 ## Тестування
 
 Драбинка довіри: integration проти справжнього Postgres → E2E повного застосунку → контракт Pact →
-брокер і `can-i-deploy`. Потрібен лише запущений Docker: базу для тестів піднімає testcontainers, compose
-для перших чотирьох команд не потрібен.
+брокер і `can-i-deploy`. Потрібен лише запущений Docker: Postgres і RabbitMQ для тестів піднімає testcontainers,
+compose для перших чотирьох команд не потрібен.
 
 | Команда | Що запускає | Результат прогону |
 | --- | --- | --- |
-| `npm run test:integration` | `test/integration/` — репозиторії, checkout, воркер проти Postgres у testcontainers | 4 набори, 16 тестів, ≈3 с |
-| `npm run test:e2e` | `test/e2e/` — повний `AppModule` через supertest | 4 тести |
+| `npm run test:integration` | `test/integration/` — репозиторії, checkout, воркер, споживач `order.placed` проти Postgres і RabbitMQ у testcontainers | 5 наборів, 19 тестів |
+| `npm run test:e2e` | `test/e2e/` — повний `AppModule` через supertest: замовлення, realtime, публікація `order.placed` | 10 тестів |
 | `npm run test:contract` | `test/contract/consumer.pact-spec.ts` — consumer-тест, пише `pacts/*.json` | 3 interactions |
 | `npm run verify:provider` | `test/contract/provider.pact-spec.ts` — справжній застосунок проти контракту | 3 × `has a matching body (OK)` |
 
@@ -595,8 +614,10 @@ cp secrets/db_password.example secrets/db_password
 тестом**. Транзакція з `ROLLBACK` сюди не підходить: checkout і воркер самі відкривають транзакції й
 комітять, а тести гонки та `SKIP LOCKED` потребують кількох зʼєднань, які мають бачити закомічені дані
 одне одного. Контейнер на файл дав би ту саму чистоту, але коштує 2–3 секунди старту на кожен файл, тоді як
-`TRUNCATE` пʼяти малих таблиць — мілісекунди. Повторний запуск зелений без чистки: кожен прогін отримує
-новий контейнер, а в межах прогону стан обнуляється перед кожним тестом.
+`TRUNCATE` семи малих таблиць — мілісекунди. Повторний запуск зелений без чистки: кожен прогін отримує
+новий контейнер, а в межах прогону стан обнуляється перед кожним тестом. RabbitMQ — так само один контейнер
+на прогін (глобальний setup оголошує в ньому топологію), а тести, що читають черги, роблять `purgeQueue`
+робочої черги і DLQ перед кожним тестом.
 
 ### Test data builders
 
@@ -613,7 +634,8 @@ cp secrets/db_password.example secrets/db_password
 | `orders.repository.int-spec.ts` | завантаження графа через JOIN, `ON DELETE CASCADE`, unique `(order_id, product_id)`, FK `RESTRICT`, агрегат «виторг по продавцях» (`JOIN` + `GROUP BY`) |
 | `checkout.int-spec.ts` | атомарність транзакції, повний відкат при нестачі коштів або товару, 20 конкурентних checkout на 5 одиниць без oversell |
 | `tasks-worker.int-spec.ts` | `FOR UPDATE SKIP LOCKED` (рівно один раз на трьох воркерах), повтор, `failed` після ліміту спроб із відкатом savepoint |
-| `test/e2e/orders.e2e-spec.ts` | створити товар → оформити замовлення → прочитати обидва → повтор з тим самим `Idempotency-Key`; `400` без ключа, `404` на невідоме замовлення, `409` при нестачі товару |
+| `order-placed-consumer.int-spec.ts` | справжній RabbitMQ: дубль події → один рядок `shipments`; ефект, що падає → `requeue` × 4 і DLQ з `delivery_limit`; повідомлення поза контрактом → DLQ з `rejected` без повторів (ДЗ #19) |
+| `test/e2e/orders.e2e-spec.ts` | створити товар → оформити замовлення → прочитати обидва → повтор з тим самим `Idempotency-Key`; `400` без ключа, `404` на невідоме замовлення, `409` при нестачі товару; `POST /orders` публікує `order.placed` рівно один раз, повтор за ключем — не публікує (ДЗ #19) |
 | `test/e2e/realtime.e2e-spec.ts` | життєвий цикл статусів і `409`; SSE: `Last-Event-ID`, `400`/`403`/`404` для не-власника, нумерація після рестарту; WS: кімнати, `forbidden`/`unauthenticated` (ДЗ #18) |
 
 E2E піднімає `Test.createTestingModule({ imports: [AppModule] })` без підмін провайдерів. Налаштування
@@ -689,7 +711,8 @@ curl -s "$PACT_BROKER_URL/can-i-deploy?pacticipant=marketplace-web&version=$VERS
 
 ### CI
 
-`.github/workflows/ci.yml`: job `tests` — `test:integration` і `test:e2e`; job `contract` — pipeline контракту,
+`.github/workflows/ci.yml`: job `db` — compose-стенд (Postgres, PgBouncer, RabbitMQ), міграції, демо ДЗ #14 і
+ДЗ #19, бекап і drill; job `tests` — `test:integration` і `test:e2e`; job `contract` — pipeline контракту,
 де кожен тег ставить крок деплою, а не крок перевірки:
 
 1. `test:contract` → публікація контракту (`scripts/pact-broker.sh publish`);
@@ -707,8 +730,8 @@ bootstrap, провайдер деплоїться першим; змістов�
 між прогонами: тоді гейт консюмера на `master` порівнює контракт із тим провайдером, який справді у prod, а
 гейт провайдера на кожному PR — з консюмерами у prod. Перевірено локально на тій самій послідовності:
 гейт консюмера до деплою провайдера — `unknown`, після — `true`; контракт, який провайдер порушує, валить
-`verify:provider`, а його гейт лишається `null`. Пароль дев-бази в job `db` теж береться зі secrets
-(`DB_PASSWORD`, за замовчуванням дев-значення стенда). Workflow локально не запускався.
+`verify:provider`, а його гейт лишається `null`. Паролі дев-бази і брокера в job `db` теж беруться зі secrets
+(`DB_PASSWORD`, `BROKER_PASSWORD`; за замовчуванням — дев-значення стенда). Workflow локально не запускався.
 
 ## Realtime: статус замовлення без перезавантаження
 
@@ -753,7 +776,7 @@ bootstrap, провайдер деплоїться першим; змістов�
 ```bash
 cp .env.example .env
 cp secrets/db_password.example secrets/db_password
-npm ci && npm run db:up && npm run build && npm run migrate && npm run seed && npm start
+npm ci && npm run db:up && npm run build && npm run migrate && npm run events:topology && npm run seed && npm start
 ```
 
 У другому терміналі створіть замовлення й змінюйте статус:
@@ -846,12 +869,165 @@ exit=0
 виправданий там, де клієнт теж шле потік повідомлень — чат із продавцем або живий кошик, — і тоді один
 socket.io-канал закриє обидва напрямки.
 
+## Async-події через RabbitMQ
+
+Realtime з ДЗ #18 доставляє лише тому, хто підключений зараз. Для всього, що має дожити до появи одержувача,
+між API і його читачами стоїть брокер — RabbitMQ 4.2 (LTS-серія з підтримкою до 2030; сервіс `rabbitmq` у
+`docker-compose.yml`, образ із суфіксом `-management`: AMQP на `5672`, вебморда на `15672`). Він не має нічого
+спільного з Pact Broker із розділу «Тестування»: той зберігає контракти, цей — повідомлення.
+
+### Топологія
+
+Оголошує її споживач при старті (`startConsumer` → `declareTopology` у `src/events/topology.ts`) або бутстрап-крок
+`npm run events:topology`; продюсер лише перевіряє, що exchange існує (`checkExchange`), і не знає, хто його
+слухає.
+
+| Обʼєкт | Імʼя | Навіщо |
+| --- | --- | --- |
+| topic-exchange | `shop.events` | усі події домену; routing key = тип події |
+| quorum-черга | `fulfillment.order-placed` | binding `order.placed`; `x-dead-letter-exchange: shop.events.dlx`, `x-delivery-limit: 3` |
+| fanout-exchange + черга | `shop.events.dlx` → `shop.events.dlq` | окремий контур DLQ; причина смерті — у заголовках `x-death` |
+| fanout-exchange + черга | `shop.events.unrouted` | alternate exchange для `shop.events`: подія з routing key без binding не зникає мовчки (confirm при цьому позитивний), а лягає сюди |
+
+DLQ і unrouted — classic durable: обсяг малий, а delivery-limit (у 4.x quorum-черги мають його за
+замовчуванням — 20) там шкодив би: повідомлення, яке оператор перечитує, не має зникнути. Аргументи черги
+незмінні — якщо змінити `x-delivery-limit` у коді, `assertQueue` впаде з `406 PRECONDITION_FAILED`; чергу треба
+видалити (`rabbitmqctl delete_queue fulfillment.order-placed`) або переносити налаштування в політику.
+
+### Подія і публікація
+
+Контракт `order.placed` (`src/events/order-placed.ts`) — спроектований конверт, а не сутність через spread:
+`eventId`, `type`, `occurredAt`, `payload: { orderId, userId, totalCents, items[{ productId, quantity }] }`;
+споживач валідує його zod-схемою. `eventId` стабільний — це UUID (версія 5-подібна, SHA-1) від
+`order.placed:<orderId>`, тож повторна публікація тієї ж події (ретрай продюсера після втраченого confirm) має
+той самий id; за ним і за `orderId` споживач упізнає дубль.
+
+Подія виходить із бізнес-операції: `OrdersService.create` після коміту checkout публікує її через
+`EventPublisher` (`src/events/publisher.ts`) — confirm-канал (`createConfirmChannel`), `persistent: true`,
+`messageId = eventId`, `waitForConfirms()` до відповіді клієнту. Ідемпотентний повтор `POST /orders` з тим самим
+`Idempotency-Key` не публікує вдруге (E2E-тест). Між COMMIT і publish є щілина: якщо брокер недоступний саме тут,
+замовлення вже існує, а події немає — клієнт отримує `503`, повтор із тим самим ключем повертає `201` із
+замовленням, але подію до появи transactional outbox (ДЗ #22) доведеться відновлювати вручну. Якщо exchange не
+оголошено, API не стартує (помилка з підказкою `npm run events:topology`), а не губить події в нікуди. Після
+обриву зʼєднання з брокером наступна публікація перепідключається сама; `/health` стан брокера не перевіряє —
+збій видно на публікації (`503`).
+
+### Споживач
+
+`npm run consume` → `src/consumer.ts` (у контейнері — той самий образ із командою `node dist/consumer.js`);
+бібліотечна частина — `src/events/consumer.ts`:
+
+- `noAck: false`, `channel.ack` — **після** ефекту. `prefetch=20` (константа `PREFETCH`): ефект — один `INSERT`
+  на 2–5 мс, 20 × 5 мс = 0,1 с ≪ `consumer_timeout` 30 хв; `prefetch=1` для 2-мілісекундної роботи — зайвий
+  round-trip на кожне повідомлення, а дефолтний 0 — перший споживач забирає всю чергу, другий простоює.
+- Ефект — створити відправлення: `INSERT INTO shipments (order_id, event_id) … ON CONFLICT (order_id) DO NOTHING
+  RETURNING order_id` (міграція `Shipments`): природний ключ бізнес-операції, порожній `RETURNING` → дубль, ефект
+  пропущено. Сховище — та сама Postgres, тому дедуп переживає рестарт і працює між інстансами; `Set` у памʼяті
+  тут не рахувався б.
+- Ефект не вдався (у демо — FK: замовлення не існує) → `reject(requeue=true)`: споживач не відрізняє тимчасову
+  помилку від постійної, тож повторює; quorum-черга рахує доставки, і після `x-delivery-limit=3` (чотири
+  доставки) брокер сам переносить повідомлення в DLX з причиною `delivery_limit`.
+- Повідомлення, що порушує контракт (не JSON, не та схема), валідним не стане ніколи → `reject(requeue=false)`
+  одразу, причина `rejected` (інтеграційний тест).
+- `basic.cancel` від брокера (`msg === null`) — не «нічого не прийшло», а сигнал: процес завершується з кодом 1,
+  щоб його перезапустив супервізор; `SIGTERM`/`SIGINT` — коректне завершення (`cancel`, дочекатись in-flight,
+  закрити канал).
+
+Щілини між «позначив оброблене» і «застосував ефект» тут немає — позначка і є ефектом (один `INSERT`); а от між
+ефектом і `ack` вона є, саме її показує `demo:duplicate`. Закривається вона не меншою щілиною, а спільною
+транзакцією позначки й ефекту (ДЗ #22).
+
+### Чому at-least-once, а не exactly-once
+
+`ack` — це не «дійшло», це «я більше не вимагаю повтору». Підтвердив до ефекту — падіння між ack і ефектом
+втрачає роботу (at-most-once). Підтвердив після — падіння між ефектом і ack повертає повідомлення в чергу, і
+ефект виконується вдруге (at-least-once). Третього варіанта у доставки немає: exactly-once на рівні брокера не
+існує ні в RabbitMQ, ні деінде. Тут обрано at-least-once (ручний `ack` після ефекту), а щоб результат був один,
+ефект зроблено ідемпотентним: він виражений через природний ключ `order_id`, і повторна доставка впирається в
+`ON CONFLICT DO NOTHING`. At-least-once доставка + ідемпотентний ефект = exactly-once **результат**. Операція
+на кшталт `UPDATE products SET stock = stock - 1` такою не була б — її довелося б захищати ключем ідемпотентності
+(`eventId` у таблиці оброблених), а не природним ключем.
+
+### Демо
+
+Три скрипти (`src/demo-publish.ts`, `src/demo-dlq.ts`, `src/demo-duplicate.ts`, спільний харнес
+`src/events/demo-harness.ts`) ходять у брокер і базу через `scripts/with-secrets.sh dev` — як `migrate`/`seed`.
+Кожен спершу приводить стан до чистого (оголошує топологію, `purgeQueue` робочої черги, DLQ і unrouted;
+якщо до черги вже підключений сторонній споживач — наприклад, `npm run consume` в іншому терміналі, — демо
+відмовляється стартувати, бо його числа були б хибними), запускає споживача **окремим процесом**
+(`fork(dist/consumer.js)`; той звітує стадії через IPC і сам завершується, якщо батьківський процес зник), друкує підсумок
+рядками `ключ=значення` і завершується з кодом ≠ 0, якщо інваріант порушено. Дані створюються на місці
+(продавець, покупець, товар → `checkout`), `seed` не потрібен; потрібні лише міграції.
+
+`npm run demo:publish` — пʼять checkout → пʼять `order.placed` у чергу **до** старту споживача (`queued=5`:
+брокер зберігає до появи одержувача), далі споживач забирає все:
+
+```
+published=5
+queued=5
+delivered=5
+effect=5
+acked=5
+work=0
+dlq=0
+prefetch=20
+```
+
+`npm run demo:dlq` — отруєне повідомлення: валідна подія про замовлення, якого в базі немає. Чотири доставки,
+чотири `reject(requeue=true)`, потім брокер переносить його в DLQ; демо читає причину з `x-first-death-reason`
+(`get` + `nack(requeue)`, щоб повідомлення лишилось у DLQ):
+
+```
+published=1
+deliveries=4
+rejected=4
+delivery-limit=3
+work=0
+dlq=1
+dlq-reason=delivery_limit
+effect=0
+```
+
+`npm run demo:duplicate` — обрана форма дубля: **kill -9 дочірнього процесу-споживача**. Перший споживач
+запускається з `CONSUMER_CRASH_AFTER_EFFECT=1`: після `INSERT` (ефект є), але до `ack`, він убиває власний
+процес `SIGKILL` — для брокера це те саме, що `kill -9` ззовні чи падіння пода: сокет закриває ОС, брокер бачить
+обрив і повертає непідтверджене повідомлення в чергу з `redelivered=true`. Другий споживач отримує його, `INSERT`
+упирається в `ON CONFLICT`, ефект пропущено, `ack`:
+
+```
+published=1
+deliveries=2
+redelivered=1
+applied=1
+skipped=1
+acked=1
+effect=1
+work=0
+dlq=0
+```
+
+`deliveries=1` тут означало б, що дубля не було і демо нічого не довело (типова причина — `noAck: true`), тому
+інваріант вимагає `deliveries ≥ 2` **і** `effect=1`.
+
+### Що лишилось за межами
+
+- Між `reject(requeue=true)` немає затримки: отруєне повідомлення пробігає ліміт за мілісекунди, а тимчасовий
+  збій бази означає швидкий DLQ. Backoff через retry-чергу з TTL тут не робився.
+- `dead-letter-strategy` — дефолтний `at-most-once`: перенесення в DLX не підтверджується. `at-least-once`
+  вимагає `overflow: reject-publish` і без нього не вмикається мовчки — брокер відкочується на `at-most-once` і
+  пише про це лише в лог.
+- Transactional outbox (база і брокер атомарно) і `processed_messages` в одній транзакції з ефектом — ДЗ #22;
+  Redis і BullMQ поверх тієї ж події — ДЗ #23.
+
+
 ## Grading
 
 ```bash
 docker compose up -d --wait
 export DB_HOST=127.0.0.1 DB_PORT=6432 DB_USER=marketplace_a DB_PASSWORD=marketplace_dev DB_NAME=marketplace
+export BROKER_URL=amqp://marketplace:marketplace_dev@127.0.0.1:5672
 export SKIP_VAULT=1
+npm ci && npm run build && npm run migrate
 bash scripts/with-secrets.sh dev bash scripts/backup.sh
 bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
 ```
@@ -866,9 +1042,9 @@ bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
 працює й форма без обгортки (`bash scripts/backup.sh`). `backup.sh` перевіряє `DB_HOST:DB_PORT` справжнім
 підключенням: із неправильною адресою або портом він завершується з exit 1.
 
-Бекап і drill проходять одразу після `up` (схеми ще немає — drill чесно покаже `tables|0` і `MATCH`).
-Щоб drill порівнював справжні дані, перед бекапом застосуйте міграції й seed:
-`npm ci && npm run build && npm run migrate && npm run seed`.
+Бекап і drill у блоці йдуть після міграцій, тож drill порівнює справжню схему; одразу після `up` вони
+проходять теж (схеми ще немає — drill чесно покаже `tables|0` і `MATCH`), а з `npm run seed` перед бекапом
+порівнюються й дані.
 
 Команди попередніх ДЗ працюють із тими самими `export`: `npm ci && npx tsc --noEmit`, `npm run build`,
 `npm run migrate`, `npm run migrate:show`, `npm run migrate:revert`, `npm run seed && npm run seed`,
@@ -876,7 +1052,7 @@ bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
 `npm run demo:workers`, `npm run demo:retry`. Міграції застосовуються на чисту базу: якщо в томі лишилась
 схема з `db/schema.sql`, спершу `docker compose down -v`.
 
-ДЗ #16 (потрібен лише запущений Docker, базу піднімає testcontainers): `npm ci && npx tsc --noEmit`,
+ДЗ #16 (потрібен лише запущений Docker, базу і RabbitMQ піднімає testcontainers): `npm ci && npx tsc --noEmit`,
 `npm run test:integration`, `npm run test:e2e`, `npm run test:contract`, `npm run verify:provider`;
 послідовність гейта з брокером — у «Тестування → Брокер локально і гейт can-i-deploy».
 
@@ -884,6 +1060,14 @@ bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
 `Last-Event-ID` і два прогони `node scripts/realtime-demo.mjs` / `--same-room` — у тому ж розділі. SSE-потік
 віддається лише власнику: у `curl` потрібен `-H 'X-User-Id: <user_id замовлення>'` (для замовлення з
 прикладу — `1`), без нього — `400`.
+
+ДЗ #19 (після `npm run build && npm run migrate` з блоку вище; `seed` не потрібен — демо створюють свої дані):
+`npm run demo:publish`, `npm run demo:dlq`, `npm run demo:duplicate`. `BROKER_URL` — AMQP-адреса RabbitMQ зі
+стенда: схема `amqp`, порт `5672` (на `15672` — вебморда менеджменту, вона протоколом AMQP не відповідає).
+Користувача `marketplace` / `marketplace_dev` створює compose через `RABBITMQ_DEFAULT_USER`/`RABBITMQ_DEFAULT_PASS`;
+пароль можна задати змінною `BROKER_PASSWORD` при першому `docker compose up` — так робить CI. Статичні
+перевірки (DLX і `prefetch` у коді, обгортка в `demo:*`, розділ `## Grading`, відсутність env-файлів із живими
+URL) не потребують ні стенда, ні сховища.
 
 ## Перевірки
 

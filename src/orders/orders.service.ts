@@ -2,6 +2,7 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, MoreThan, Repository } from 'typeorm';
@@ -10,6 +11,8 @@ import { IdempotencyStore } from '../common/idempotency';
 import { buildPage, decodeCursor, Page } from '../common/pagination';
 import { OrderItem } from '../entities/order-item.entity';
 import { Order } from '../entities/order.entity';
+import { orderPlaced } from '../events/order-placed';
+import { EventPublisher } from '../events/publisher';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { OrderDto, toOrderDto } from './dto/order.dto';
 import { OrderEventsService } from './order-events.service';
@@ -24,29 +27,41 @@ export class OrdersService {
     private readonly orders: Repository<Order>,
     private readonly dataSource: DataSource,
     private readonly events: OrderEventsService,
+    private readonly publisher: EventPublisher,
   ) {}
 
-  create(key: string, dto: CreateOrderDto) {
-    return this.idempotency.run(key, dto, async () => {
+  async create(key: string, dto: CreateOrderDto) {
+    const outcome = await this.idempotency.run(key, dto, () => this.place(dto));
+    if (!outcome.replayed) {
       try {
-        const order = await checkout(this.dataSource, {
-          userId: String(dto.user_id),
-          items: dto.items.map((item) => ({
-            productId: String(item.product_id),
-            quantity: item.quantity,
-          })),
-        });
-        return toOrderDto(order);
+        await this.publisher.publish(orderPlaced(outcome.result));
       } catch (err) {
-        if (err instanceof CheckoutError) {
-          throw err.code === 'USER_NOT_FOUND' ||
-            err.code === 'PRODUCT_NOT_FOUND'
-            ? new NotFoundException(err.message)
-            : new ConflictException(err.message);
-        }
-        throw err;
+        throw new ServiceUnavailableException(
+          `Order ${outcome.result.id} is placed but order.placed was not published: ${(err as Error).message}`,
+        );
       }
-    });
+    }
+    return outcome;
+  }
+
+  private async place(dto: CreateOrderDto): Promise<OrderDto> {
+    try {
+      const order = await checkout(this.dataSource, {
+        userId: String(dto.user_id),
+        items: dto.items.map((item) => ({
+          productId: String(item.product_id),
+          quantity: item.quantity,
+        })),
+      });
+      return toOrderDto(order);
+    } catch (err) {
+      if (err instanceof CheckoutError) {
+        throw err.code === 'USER_NOT_FOUND' || err.code === 'PRODUCT_NOT_FOUND'
+          ? new NotFoundException(err.message)
+          : new ConflictException(err.message);
+      }
+      throw err;
+    }
   }
 
   async findAll(limit: number, cursor?: string): Promise<Page<OrderDto>> {

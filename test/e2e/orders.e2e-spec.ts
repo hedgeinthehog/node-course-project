@@ -1,6 +1,9 @@
 import { NestExpressApplication } from '@nestjs/platform-express';
+import amqp from 'amqplib';
+import type { Channel, ChannelModel } from 'amqplib';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
+import { ORDER_PLACED_QUEUE } from '../../src/events/topology';
 import { given } from '../integration/testkit/builders';
 import { resetDatabase } from '../integration/testkit/database';
 import { createApp } from './create-app';
@@ -8,14 +11,24 @@ import { createApp } from './create-app';
 describe('orders API (e2e)', () => {
   let app: NestExpressApplication;
   let dataSource: DataSource;
+  let connection: ChannelModel;
+  let channel: Channel;
   const api = () => request(app.getHttpServer());
 
   beforeAll(async () => {
     app = await createApp();
     dataSource = app.get(DataSource);
+    connection = await amqp.connect(process.env.BROKER_URL!);
+    channel = await connection.createChannel();
   });
-  afterAll(() => app.close());
-  beforeEach(() => resetDatabase(dataSource));
+  afterAll(async () => {
+    await connection.close();
+    await app.close();
+  });
+  beforeEach(async () => {
+    await resetDatabase(dataSource);
+    await channel.purgeQueue(ORDER_PLACED_QUEUE);
+  });
 
   it('creates a product, places an order and reads both back', async () => {
     const { user } = given(dataSource);
@@ -118,5 +131,44 @@ describe('orders API (e2e)', () => {
     expect(response.body.detail).toContain('not enough stock');
     const stock = await api().get(`/products/${lamp.id}`).expect(200);
     expect(stock.body.stock).toBe(1);
+  });
+
+  it('publishes order.placed once per placed order, not per replayed request', async () => {
+    const { user, product } = given(dataSource);
+    const buyer = await user();
+    const keyboard = await product({ priceCents: 12_000, stock: 5 });
+    const orderRequest = {
+      user_id: Number(buyer.id),
+      items: [{ product_id: Number(keyboard.id), quantity: 2 }],
+    };
+
+    const placed = await api()
+      .post('/orders')
+      .set('Idempotency-Key', 'order-3')
+      .send(orderRequest)
+      .expect(201);
+    await api()
+      .post('/orders')
+      .set('Idempotency-Key', 'order-3')
+      .send(orderRequest)
+      .expect(201);
+
+    const message = await channel.get(ORDER_PLACED_QUEUE, { noAck: true });
+    if (!message) throw new Error('order.placed was not published');
+    expect(message.properties.messageId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(JSON.parse(message.content.toString())).toEqual({
+      eventId: message.properties.messageId,
+      type: 'order.placed',
+      occurredAt: placed.body.created_at,
+      payload: {
+        orderId: placed.body.id,
+        userId: Number(buyer.id),
+        totalCents: 24_000,
+        items: [{ productId: Number(keyboard.id), quantity: 2 }],
+      },
+    });
+    await expect(
+      channel.get(ORDER_PLACED_QUEUE, { noAck: true }),
+    ).resolves.toBe(false);
   });
 });

@@ -12,13 +12,15 @@ jobs:
       DB_USER: marketplace_a
       DB_PASSWORD: ${{ secrets.DB_PASSWORD || 'marketplace_dev' }}
       DB_NAME: marketplace
+      BROKER_PASSWORD: ${{ secrets.BROKER_PASSWORD || 'marketplace_dev' }}
+      BROKER_URL: amqp://marketplace:${{ secrets.BROKER_PASSWORD || 'marketplace_dev' }}@127.0.0.1:5672
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - run: docker compose up -d --wait postgres pgbouncer
+      - run: docker compose up -d --wait postgres pgbouncer rabbitmq
       - run: npm ci
       - run: npx tsc --noEmit
       - run: npm run lint
@@ -29,6 +31,9 @@ jobs:
       - run: npm run demo:race
       - run: npm run demo:workers
       - run: npm run demo:retry
+      - run: npm run demo:publish
+      - run: npm run demo:dlq
+      - run: npm run demo:duplicate
       - run: bash scripts/with-secrets.sh dev bash scripts/backup.sh
       - run: bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
       - run: npx redocly lint openapi/openapi.yaml
