@@ -7,7 +7,9 @@ export const UNROUTED_QUEUE = 'shop.events.unrouted';
 export const DEAD_LETTER_EXCHANGE = 'shop.events.dlx';
 export const DEAD_LETTER_QUEUE = 'shop.events.dlq';
 export const ORDER_PLACED_QUEUE = 'fulfillment.order-placed';
+export const RETRY_QUEUE = 'fulfillment.order-placed.retry';
 export const DELIVERY_LIMIT = 3;
+export const RETRY_DELAY_MS = 2000;
 
 export async function declareTopology(channel: Channel): Promise<void> {
   await channel.assertExchange(DEAD_LETTER_EXCHANGE, 'fanout', {
@@ -33,4 +35,12 @@ export async function declareTopology(channel: Channel): Promise<void> {
     },
   });
   await channel.bindQueue(ORDER_PLACED_QUEUE, EVENTS_EXCHANGE, ORDER_PLACED);
+  await channel.assertQueue(RETRY_QUEUE, {
+    durable: true,
+    arguments: {
+      'x-message-ttl': RETRY_DELAY_MS,
+      'x-dead-letter-exchange': '',
+      'x-dead-letter-routing-key': ORDER_PLACED_QUEUE,
+    },
+  });
 }

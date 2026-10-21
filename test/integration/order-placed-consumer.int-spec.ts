@@ -4,8 +4,9 @@ import { DataSource } from 'typeorm';
 import { Shipment } from '../../src/entities/shipment.entity';
 import {
   ConsumerSignal,
-  startConsumer,
+  MAX_RETRIES,
   RunningConsumer,
+  startConsumer,
 } from '../../src/events/consumer';
 import { ORDER_PLACED, orderPlaced } from '../../src/events/order-placed';
 import { EventPublisher } from '../../src/events/publisher';
@@ -14,28 +15,45 @@ import {
   DELIVERY_LIMIT,
   EVENTS_EXCHANGE,
   ORDER_PLACED_QUEUE,
+  RETRY_DELAY_MS,
+  RETRY_QUEUE,
 } from '../../src/events/topology';
 import { toOrderDto } from '../../src/orders/dto/order.dto';
 import { given } from './testkit/builders';
 import { connect, resetDatabase } from './testkit/database';
 
 async function until(check: () => Promise<boolean> | boolean) {
-  const deadline = Date.now() + 15_000;
+  const deadline = Date.now() + 30_000;
   while (!(await check())) {
     if (Date.now() > deadline) throw new Error('condition not met in time');
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
 }
 
+const missingOrder = () =>
+  orderPlaced({
+    id: 424242,
+    user_id: 1,
+    items: [{ product_id: 1, quantity: 1 }],
+    total_cents: 100,
+    status: 'paid',
+    created_at: new Date().toISOString(),
+  });
+
 describe('order.placed consumer', () => {
   let dataSource: DataSource;
   let connection: ChannelModel;
   let channel: Channel;
   let publisher: EventPublisher;
-  let consumer: RunningConsumer;
+  let consumer: RunningConsumer | undefined;
   const signals: ConsumerSignal[] = [];
 
   const settled = () => signals.filter((s) => s.stage === 'settled');
+  const run = async () => {
+    consumer = await startConsumer(connection, dataSource, {
+      observe: (signal) => void signals.push(signal),
+    });
+  };
   const deadLetter = async () => {
     await until(
       async () =>
@@ -60,16 +78,18 @@ describe('order.placed consumer', () => {
   });
   beforeEach(async () => {
     await resetDatabase(dataSource);
-    await channel.purgeQueue(ORDER_PLACED_QUEUE);
-    await channel.purgeQueue(DEAD_LETTER_QUEUE);
+    for (const queue of [ORDER_PLACED_QUEUE, RETRY_QUEUE, DEAD_LETTER_QUEUE]) {
+      await channel.purgeQueue(queue);
+    }
     signals.length = 0;
-    consumer = await startConsumer(connection, dataSource, {
-      observe: (signal) => void signals.push(signal),
-    });
   });
-  afterEach(() => consumer.stop());
+  afterEach(async () => {
+    await consumer?.stop();
+    consumer = undefined;
+  });
 
   it('creates the shipment once and skips the duplicate delivery of the same event', async () => {
+    await run();
     const { order } = given(dataSource);
     const placed = await order();
     const event = orderPlaced(toOrderDto(placed));
@@ -92,33 +112,41 @@ describe('order.placed consumer', () => {
     ]);
   });
 
-  it('requeues an event whose effect fails and dead-letters it after the delivery limit', async () => {
-    const event = orderPlaced({
-      id: 424242,
-      user_id: 1,
-      items: [{ product_id: 1, quantity: 1 }],
-      total_cents: 100,
-      status: 'paid',
-      created_at: new Date().toISOString(),
-    });
+  it('retries a failing effect through the delayed retry queue and dead-letters it after the retry limit', async () => {
+    await run();
+    const event = missingOrder();
+    const started = Date.now();
 
     await publisher.publish(event);
     const dead = await deadLetter();
 
-    expect(settled().map((s) => s.outcome)).toEqual(
-      Array(DELIVERY_LIMIT + 1).fill('requeue'),
+    expect(Date.now() - started).toBeGreaterThanOrEqual(
+      MAX_RETRIES * RETRY_DELAY_MS * 0.9,
     );
+    expect(settled().map((s) => s.outcome)).toEqual([
+      ...Array<string>(MAX_RETRIES).fill('retry'),
+      'drop',
+    ]);
     expect(
-      signals.filter((s) => s.stage === 'delivered' && s.redelivered),
-    ).toHaveLength(DELIVERY_LIMIT);
-    expect(dead.properties.headers?.['x-first-death-reason']).toBe(
-      'delivery_limit',
+      signals.filter((s) => s.stage === 'delivered').map((s) => s.attempt),
+    ).toEqual([1, 2, 3, 4]);
+    expect(dead.properties.headers?.['x-death']).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          queue: ORDER_PLACED_QUEUE,
+          reason: 'rejected',
+          count: 1,
+        }),
+        expect.objectContaining({ queue: RETRY_QUEUE, reason: 'expired' }),
+      ]),
     );
+    expect(dead.properties.headers?.['x-last-death-reason']).toBe('rejected');
     expect(JSON.parse(dead.content.toString())).toEqual(event);
     await expect(dataSource.getRepository(Shipment).count()).resolves.toBe(0);
   });
 
   it('rejects a message that violates the contract without retrying it', async () => {
+    await run();
     channel.publish(
       EVENTS_EXCHANGE,
       ORDER_PLACED,
@@ -136,5 +164,29 @@ describe('order.placed consumer', () => {
     ]);
     expect(dead.properties.headers?.['x-first-death-reason']).toBe('rejected');
     expect(dead.properties.headers?.['x-death']?.[0]?.count).toBe(1);
+  });
+
+  it('dead-letters a message that keeps coming back unacked after the delivery limit (crash-loop guard)', async () => {
+    const crashing = await connection.createChannel();
+    let deliveries = 0;
+    const { consumerTag } = await crashing.consume(
+      ORDER_PLACED_QUEUE,
+      (msg) => {
+        if (!msg) return;
+        deliveries++;
+        crashing.reject(msg, true);
+      },
+      { noAck: false },
+    );
+
+    await publisher.publish(missingOrder());
+    const dead = await deadLetter();
+    await crashing.cancel(consumerTag);
+    await crashing.close();
+
+    expect(deliveries).toBe(DELIVERY_LIMIT + 1);
+    expect(dead.properties.headers?.['x-first-death-reason']).toBe(
+      'delivery_limit',
+    );
   });
 });

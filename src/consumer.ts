@@ -3,7 +3,7 @@ import { DataSource } from 'typeorm';
 import { parseBrokerUrl } from './config/env.schema';
 import { dataSourceOptions } from './data-source';
 import { ConsumerSignal, PREFETCH, startConsumer } from './events/consumer';
-import { ORDER_PLACED_QUEUE } from './events/topology';
+import { ORDER_PLACED_QUEUE, RETRY_DELAY_MS } from './events/topology';
 
 const tag = `consumer ${process.pid}`;
 const crashAfterEffect = process.env.CONSUMER_CRASH_AFTER_EFFECT === '1';
@@ -11,11 +11,11 @@ const crashAfterEffect = process.env.CONSUMER_CRASH_AFTER_EFFECT === '1';
 function describe(signal: ConsumerSignal) {
   switch (signal.stage) {
     case 'delivered':
-      return `delivered ${signal.eventId} redelivered=${signal.redelivered}`;
+      return `delivered ${signal.eventId} attempt=${signal.attempt} redelivered=${signal.redelivered}`;
     case 'effect':
       return `${signal.eventId} ${signal.applied ? 'shipment created' : 'duplicate, effect skipped'}`;
     case 'settled':
-      return `${signal.eventId} ${signal.outcome}${signal.error ? `: ${signal.error}` : ''}`;
+      return `${signal.eventId} ${signal.outcome}${signal.outcome === 'retry' ? ` in ${RETRY_DELAY_MS} ms` : ''}${signal.error ? `: ${signal.error}` : ''}`;
   }
 }
 

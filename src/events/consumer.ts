@@ -1,17 +1,24 @@
-import type { ChannelModel, ConsumeMessage } from 'amqplib';
+import type { ChannelModel, ConfirmChannel, ConsumeMessage } from 'amqplib';
 import { DataSource } from 'typeorm';
 import { OrderPlacedEvent, parseOrderPlaced } from './order-placed';
-import { declareTopology, ORDER_PLACED_QUEUE } from './topology';
+import { declareTopology, ORDER_PLACED_QUEUE, RETRY_QUEUE } from './topology';
 
 export const PREFETCH = 20;
+export const MAX_RETRIES = 3;
+const RETRY_HEADER = 'x-retry';
 
 export type ConsumerSignal =
-  | { stage: 'delivered'; eventId: string | null; redelivered: boolean }
+  | {
+      stage: 'delivered';
+      eventId: string | null;
+      attempt: number;
+      redelivered: boolean;
+    }
   | { stage: 'effect'; eventId: string; applied: boolean }
   | {
       stage: 'settled';
       eventId: string | null;
-      outcome: 'ack' | 'requeue' | 'drop';
+      outcome: 'ack' | 'retry' | 'drop';
       error?: string;
     };
 
@@ -37,6 +44,24 @@ export async function applyOrderPlaced(
   return inserted.length === 1;
 }
 
+function scheduleRetry(
+  channel: ConfirmChannel,
+  msg: ConsumeMessage,
+  retry: number,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    channel.sendToQueue(
+      RETRY_QUEUE,
+      msg.content,
+      {
+        ...msg.properties,
+        headers: { ...msg.properties.headers, [RETRY_HEADER]: retry },
+      },
+      (err) => (err ? reject(err) : resolve()),
+    );
+  });
+}
+
 export async function startConsumer(
   connection: ChannelModel,
   dataSource: DataSource,
@@ -48,7 +73,7 @@ export async function startConsumer(
     stopping = true;
     onClose?.(reason);
   };
-  const channel = await connection.createChannel();
+  const channel = await connection.createConfirmChannel();
   channel.on('error', (err) => closed(err.message));
   channel.on('close', () => closed('channel closed by the broker'));
   await declareTopology(channel);
@@ -59,6 +84,7 @@ export async function startConsumer(
       typeof msg.properties.messageId === 'string'
         ? msg.properties.messageId
         : null;
+    const retries = Number(msg.properties.headers?.[RETRY_HEADER] ?? 0);
     let event: OrderPlacedEvent;
     try {
       event = parseOrderPlaced(msg.content);
@@ -66,6 +92,7 @@ export async function startConsumer(
       await observe({
         stage: 'delivered',
         eventId: messageId,
+        attempt: retries + 1,
         redelivered: msg.fields.redelivered,
       });
       channel.reject(msg, false);
@@ -81,19 +108,22 @@ export async function startConsumer(
     await observe({
       stage: 'delivered',
       eventId,
+      attempt: retries + 1,
       redelivered: msg.fields.redelivered,
     });
     let applied: boolean;
     try {
       applied = await applyOrderPlaced(dataSource, event);
     } catch (err) {
-      channel.reject(msg, true);
-      await observe({
-        stage: 'settled',
-        eventId,
-        outcome: 'requeue',
-        error: (err as Error).message,
-      });
+      const error = (err as Error).message;
+      if (retries < MAX_RETRIES) {
+        await scheduleRetry(channel, msg, retries + 1);
+        channel.ack(msg);
+        await observe({ stage: 'settled', eventId, outcome: 'retry', error });
+      } else {
+        channel.reject(msg, false);
+        await observe({ stage: 'settled', eventId, outcome: 'drop', error });
+      }
       return;
     }
     await observe({ stage: 'effect', eventId, applied });

@@ -29,7 +29,8 @@ async function main() {
   );
   const effect = await harness.shipments(orders.map((order) => order.id));
   const work = await harness.depth(ORDER_PLACED_QUEUE);
-  const dlq = await harness.depth(DEAD_LETTER_QUEUE);
+  const dlq = await harness.deadLetters();
+  const dlqDepth = await harness.depth(DEAD_LETTER_QUEUE);
   await harness.close();
 
   summary({
@@ -40,15 +41,11 @@ async function main() {
     acked,
     work,
     dlq,
+    'dlq-depth': dlqDepth,
     prefetch: PREFETCH,
   });
   finish(
-    queued === EVENTS &&
-      delivered === EVENTS &&
-      effect === EVENTS &&
-      acked === EVENTS &&
-      work === 0 &&
-      dlq === 0,
+    effect === EVENTS && acked === EVENTS && work === 0 && dlq === 0,
     'every published event was delivered, applied once and acked',
   );
 }

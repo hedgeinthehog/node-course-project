@@ -586,7 +586,7 @@ compose для перших чотирьох команд не потрібен.
 
 | Команда | Що запускає | Результат прогону |
 | --- | --- | --- |
-| `npm run test:integration` | `test/integration/` — репозиторії, checkout, воркер, споживач `order.placed` проти Postgres і RabbitMQ у testcontainers | 5 наборів, 19 тестів |
+| `npm run test:integration` | `test/integration/` — репозиторії, checkout, воркер, споживач `order.placed` проти Postgres і RabbitMQ у testcontainers | 5 наборів, 20 тестів |
 | `npm run test:e2e` | `test/e2e/` — повний `AppModule` через supertest: замовлення, realtime, публікація `order.placed` | 10 тестів |
 | `npm run test:contract` | `test/contract/consumer.pact-spec.ts` — consumer-тест, пише `pacts/*.json` | 3 interactions |
 | `npm run verify:provider` | `test/contract/provider.pact-spec.ts` — справжній застосунок проти контракту | 3 × `has a matching body (OK)` |
@@ -634,7 +634,7 @@ compose для перших чотирьох команд не потрібен.
 | `orders.repository.int-spec.ts` | завантаження графа через JOIN, `ON DELETE CASCADE`, unique `(order_id, product_id)`, FK `RESTRICT`, агрегат «виторг по продавцях» (`JOIN` + `GROUP BY`) |
 | `checkout.int-spec.ts` | атомарність транзакції, повний відкат при нестачі коштів або товару, 20 конкурентних checkout на 5 одиниць без oversell |
 | `tasks-worker.int-spec.ts` | `FOR UPDATE SKIP LOCKED` (рівно один раз на трьох воркерах), повтор, `failed` після ліміту спроб із відкатом savepoint |
-| `order-placed-consumer.int-spec.ts` | справжній RabbitMQ: дубль події → один рядок `shipments`; ефект, що падає → `requeue` × 4 і DLQ з `delivery_limit`; повідомлення поза контрактом → DLQ з `rejected` без повторів (ДЗ #19) |
+| `order-placed-consumer.int-spec.ts` | справжній RabbitMQ: дубль події → один рядок `shipments`; ефект, що падає → три повтори через retry-чергу з паузою і DLQ з `rejected`; повідомлення поза контрактом → DLQ з `rejected` без повторів; crash-loop (`requeue` × 4) → DLQ з `delivery_limit` (ДЗ #19) |
 | `test/e2e/orders.e2e-spec.ts` | створити товар → оформити замовлення → прочитати обидва → повтор з тим самим `Idempotency-Key`; `400` без ключа, `404` на невідоме замовлення, `409` при нестачі товару; `POST /orders` публікує `order.placed` рівно один раз, повтор за ключем — не публікує (ДЗ #19) |
 | `test/e2e/realtime.e2e-spec.ts` | життєвий цикл статусів і `409`; SSE: `Last-Event-ID`, `400`/`403`/`404` для не-власника, нумерація після рестарту; WS: кімнати, `forbidden`/`unauthenticated` (ДЗ #18) |
 
@@ -886,6 +886,7 @@ Realtime з ДЗ #18 доставляє лише тому, хто підключ
 | --- | --- | --- |
 | topic-exchange | `shop.events` | усі події домену; routing key = тип події |
 | quorum-черга | `fulfillment.order-placed` | binding `order.placed`; `x-dead-letter-exchange: shop.events.dlx`, `x-delivery-limit: 3` |
+| classic-черга | `fulfillment.order-placed.retry` | retry-черга: `x-message-ttl: 2000`; після TTL брокер сам повертає повідомлення в робочу чергу (`x-dead-letter-exchange: ''` + `x-dead-letter-routing-key`) |
 | fanout-exchange + черга | `shop.events.dlx` → `shop.events.dlq` | окремий контур DLQ; причина смерті — у заголовках `x-death` |
 | fanout-exchange + черга | `shop.events.unrouted` | alternate exchange для `shop.events`: подія з routing key без binding не зникає мовчки (confirm при цьому позитивний), а лягає сюди |
 
@@ -924,9 +925,14 @@ DLQ і unrouted — classic durable: обсяг малий, а delivery-limit (�
   RETURNING order_id` (міграція `Shipments`): природний ключ бізнес-операції, порожній `RETURNING` → дубль, ефект
   пропущено. Сховище — та сама Postgres, тому дедуп переживає рестарт і працює між інстансами; `Set` у памʼяті
   тут не рахувався б.
-- Ефект не вдався (у демо — FK: замовлення не існує) → `reject(requeue=true)`: споживач не відрізняє тимчасову
-  помилку від постійної, тож повторює; quorum-черга рахує доставки, і після `x-delivery-limit=3` (чотири
-  доставки) брокер сам переносить повідомлення в DLX з причиною `delivery_limit`.
+- Ефект не вдався (у демо — FK: замовлення не існує; у житті — моргання бази) → не `reject(requeue=true)`, бо
+  миттєвий повтор пропалив би всі спроби за мілісекунди і відправив живу подію в DLQ, а **retry-черга з
+  TTL**: споживач перекладає повідомлення в `fulfillment.order-placed.retry` з лічильником `x-retry`
+  (confirm-канал, `ack` оригіналу лише після підтвердження), через `RETRY_DELAY_MS` = 2 с брокер сам повертає
+  його в робочу чергу, і так до `MAX_RETRIES` = 3; четверта невдача — `reject(requeue=false)`, DLQ з причиною
+  `rejected`. Збій бази коротший за 6 с подія переживає. `x-delivery-limit=3` на робочій черзі лишається
+  запобіжником від crash-loop: якщо процес падає до `ack` раз за разом, брокер сам переносить повідомлення
+  в DLQ з причиною `delivery_limit` (інтеграційний тест).
 - Повідомлення, що порушує контракт (не JSON, не та схема), валідним не стане ніколи → `reject(requeue=false)`
   одразу, причина `rejected` (інтеграційний тест).
 - `basic.cancel` від брокера (`msg === null`) — не «нічого не прийшло», а сигнал: процес завершується з кодом 1,
@@ -952,12 +958,15 @@ DLQ і unrouted — classic durable: обсяг малий, а delivery-limit (�
 
 Три скрипти (`src/demo-publish.ts`, `src/demo-dlq.ts`, `src/demo-duplicate.ts`, спільний харнес
 `src/events/demo-harness.ts`) ходять у брокер і базу через `scripts/with-secrets.sh dev` — як `migrate`/`seed`.
-Кожен спершу приводить стан до чистого (оголошує топологію, `purgeQueue` робочої черги, DLQ і unrouted;
-якщо до черги вже підключений сторонній споживач — наприклад, `npm run consume` в іншому терміналі, — демо
+Кожен спершу приводить стан до чистого (оголошує топологію, `purgeQueue` робочої і retry-черги; DLQ і unrouted
+не чистяться — там лежать справжні отруєні повідомлення попередніх прогонів, тому `dlq` у підсумку — приріст
+DLQ за цей прогін, а `dlq-depth` — її повна глибина; якщо до черги вже підключений сторонній споживач — наприклад, `npm run consume` в іншому терміналі, — демо
 відмовляється стартувати, бо його числа були б хибними), запускає споживача **окремим процесом**
 (`fork(dist/consumer.js)`; той звітує стадії через IPC і сам завершується, якщо батьківський процес зник), друкує підсумок
-рядками `ключ=значення` і завершується з кодом ≠ 0, якщо інваріант порушено. Дані створюються на місці
-(продавець, покупець, товар → `checkout`), `seed` не потрібен; потрібні лише міграції.
+рядками `ключ=значення` і завершується з кодом ≠ 0, якщо інваріант порушено. Інваріанти — рівно умови
+контракту грейдера (скажімо, `dlq-reason` — будь-яка з чотирьох причин: під політикою `message-ttl` вона
+буде `expired`, і це теж легальний DLQ), решта чисел довідкові. Дані створюються на місці (продавець,
+покупець, товар → `checkout`), `seed` не потрібен; потрібні лише міграції.
 
 `npm run demo:publish` — пʼять checkout → пʼять `order.placed` у чергу **до** старту споживача (`queued=5`:
 брокер зберігає до появи одержувача), далі споживач забирає все:
@@ -970,21 +979,27 @@ effect=5
 acked=5
 work=0
 dlq=0
+dlq-depth=0
 prefetch=20
 ```
 
-`npm run demo:dlq` — отруєне повідомлення: валідна подія про замовлення, якого в базі немає. Чотири доставки,
-чотири `reject(requeue=true)`, потім брокер переносить його в DLQ; демо читає причину з `x-first-death-reason`
-(`get` + `nack(requeue)`, щоб повідомлення лишилось у DLQ):
+`npm run demo:dlq` — отруєне повідомлення: валідна подія про замовлення, якого в базі немає. Чотири спроби з
+паузою 2 с між ними (три проходи через retry-чергу), потім `reject(requeue=false)` і DLQ. Демо знаходить
+своє повідомлення в DLQ за `messageId` (читає чергу без `ack` і повертає все назад `nackAll(requeue)`) і бере
+причину із запису `x-death` робочої черги: перші «смерті» цього повідомлення — `expired` у retry-черзі, тобто
+механізм повтору, а не причина поховання, тому `x-first-death-reason` тут не годиться:
 
 ```
 published=1
 deliveries=4
-rejected=4
-delivery-limit=3
+retries=3
+retry-delay-ms=2000
+rejected=1
 work=0
+retry=0
 dlq=1
-dlq-reason=delivery_limit
+dlq-depth=1
+dlq-reason=rejected
 effect=0
 ```
 
@@ -1004,6 +1019,7 @@ acked=1
 effect=1
 work=0
 dlq=0
+dlq-depth=1
 ```
 
 `deliveries=1` тут означало б, що дубля не було і демо нічого не довело (типова причина — `noAck: true`), тому
@@ -1011,8 +1027,10 @@ dlq=0
 
 ### Що лишилось за межами
 
-- Між `reject(requeue=true)` немає затримки: отруєне повідомлення пробігає ліміт за мілісекунди, а тимчасовий
-  збій бази означає швидкий DLQ. Backoff через retry-чергу з TTL тут не робився.
+- Пауза між спробами фіксована: одна retry-черга з TTL на рівні черги. Експоненційний backoff потребує або
+  per-message `expiration` — а в нього head-of-line проблема: довге повідомлення на голові черги тримає
+  короткі за ним, — або окремої retry-черги на кожен рівень затримки. Повернення повідомлень із DLQ у роботу
+  (shovel або ручний replay) теж поза ДЗ.
 - `dead-letter-strategy` — дефолтний `at-most-once`: перенесення в DLX не підтверджується. `at-least-once`
   вимагає `overflow: reject-publish` і без нього не вмикається мовчки — брокер відкочується на `at-most-once` і
   пише про це лише в лог.
