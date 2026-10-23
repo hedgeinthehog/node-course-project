@@ -1,11 +1,19 @@
-import { finish, Harness, summary, until } from './events/demo-harness';
+import {
+  finish,
+  Harness,
+  ownedBy,
+  summary,
+  until,
+} from './events/demo-harness';
+import { orderPlaced } from './events/order-placed';
 import { DEAD_LETTER_QUEUE, ORDER_PLACED_QUEUE } from './events/topology';
 
 async function main() {
   const harness = await Harness.open();
 
   const order = await harness.placeOrder();
-  await harness.publish(order);
+  await harness.relay();
+  const ours = new Set([orderPlaced(order).eventId]);
 
   const crashed = harness.spawnConsumer({ CONSUMER_CRASH_AFTER_EFFECT: '1' });
   let exit: { code: number | null; signal: string | null } | undefined;
@@ -17,12 +25,14 @@ async function main() {
 
   const restarted = harness.spawnConsumer();
   await restarted.waitFor(
-    (signals) => signals.some((s) => s.stage === 'settled'),
+    (signals) => signals.some((s) => s.stage === 'settled' && ownedBy(ours)(s)),
     'the redelivered event to be settled',
   );
   await restarted.stop();
 
-  const signals = [...crashed.signals, ...restarted.signals];
+  const signals = [...crashed.signals, ...restarted.signals].filter(
+    ownedBy(ours),
+  );
   const count = (predicate: (s: (typeof signals)[number]) => boolean) =>
     signals.filter(predicate).length;
   const deliveries = count((s) => s.stage === 'delivered');

@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { MoreThan, Repository } from 'typeorm';
+import { DataSource, MoreThan, Repository } from 'typeorm';
 import { IdempotencyStore } from '../common/idempotency';
 import { buildPage, decodeCursor, Page } from '../common/pagination';
 import { Product } from '../entities/product.entity';
@@ -10,23 +10,24 @@ import { ProductDto, toProductDto } from './dto/product.dto';
 
 @Injectable()
 export class ProductsService {
-  private readonly idempotency = new IdempotencyStore<ProductDto>();
+  private readonly idempotency: IdempotencyStore;
 
   constructor(
     @InjectRepository(Product)
     private readonly products: Repository<Product>,
-    @InjectRepository(User)
-    private readonly users: Repository<User>,
-  ) {}
+    dataSource: DataSource,
+  ) {
+    this.idempotency = new IdempotencyStore(dataSource);
+  }
 
   create(key: string, dto: CreateProductDto) {
-    return this.idempotency.run(key, dto, async () => {
+    return this.idempotency.run(key, dto, async (manager) => {
       const sellerId = String(dto.seller_id);
-      if (!(await this.users.existsBy({ id: sellerId }))) {
+      if (!(await manager.existsBy(User, { id: sellerId }))) {
         throw new NotFoundException(`Seller ${dto.seller_id} not found`);
       }
-      const product = await this.products.save(
-        this.products.create({
+      const product = await manager.save(
+        manager.create(Product, {
           sellerId,
           name: dto.name,
           description: '',

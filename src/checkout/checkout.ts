@@ -1,9 +1,12 @@
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 import { OrderItem } from '../entities/order-item.entity';
 import { Order } from '../entities/order.entity';
+import { OutboxEvent } from '../entities/outbox-event.entity';
 import { Product } from '../entities/product.entity';
 import { Task } from '../entities/task.entity';
 import { User } from '../entities/user.entity';
+import { ORDER_PLACED, orderPlaced } from '../events/order-placed';
+import { toOrderDto } from '../orders/dto/order.dto';
 
 export type CheckoutFailure =
   | 'USER_NOT_FOUND'
@@ -27,10 +30,10 @@ export interface CheckoutInput {
 }
 
 export function checkout(
-  dataSource: DataSource,
+  db: DataSource | EntityManager,
   input: CheckoutInput,
 ): Promise<Order> {
-  return dataSource.transaction(async (manager) => {
+  return db.transaction(async (manager) => {
     const quantities = new Map<string, number>();
     for (const item of input.items) {
       quantities.set(
@@ -106,6 +109,14 @@ export function checkout(
       manager.create(Task, {
         type: 'order_confirmation',
         payload: { order_id: Number(order.id) },
+      }),
+    );
+    await manager.save(
+      manager.create(OutboxEvent, {
+        aggregateType: 'order',
+        aggregateId: order.id,
+        type: ORDER_PLACED,
+        payload: orderPlaced(toOrderDto(order)),
       }),
     );
     return order;

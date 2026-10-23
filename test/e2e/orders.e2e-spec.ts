@@ -1,6 +1,6 @@
 import { NestExpressApplication } from '@nestjs/platform-express';
 import amqp from 'amqplib';
-import type { Channel, ChannelModel } from 'amqplib';
+import type { Channel, ChannelModel, GetMessage } from 'amqplib';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
 import { ORDER_PLACED_QUEUE } from '../../src/events/topology';
@@ -133,7 +133,7 @@ describe('orders API (e2e)', () => {
     expect(stock.body.stock).toBe(1);
   });
 
-  it('publishes order.placed once per placed order, not per replayed request', async () => {
+  it('relays order.placed once per placed order, not per replayed request', async () => {
     const { user, product } = given(dataSource);
     const buyer = await user();
     const keyboard = await product({ priceCents: 12_000, stock: 5 });
@@ -153,8 +153,13 @@ describe('orders API (e2e)', () => {
       .send(orderRequest)
       .expect(201);
 
-    const message = await channel.get(ORDER_PLACED_QUEUE, { noAck: true });
-    if (!message) throw new Error('order.placed was not published');
+    let message: GetMessage | false = false;
+    const deadline = Date.now() + 10_000;
+    while (!message && Date.now() < deadline) {
+      message = await channel.get(ORDER_PLACED_QUEUE, { noAck: true });
+      if (!message) await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    if (!message) throw new Error('order.placed was not relayed in time');
     expect(message.properties.messageId).toMatch(/^[0-9a-f-]{36}$/);
     expect(JSON.parse(message.content.toString())).toEqual({
       eventId: message.properties.messageId,
@@ -167,8 +172,41 @@ describe('orders API (e2e)', () => {
         items: [{ productId: Number(keyboard.id), quantity: 2 }],
       },
     });
+    await new Promise((resolve) => setTimeout(resolve, 1500));
     await expect(
       channel.get(ORDER_PLACED_QUEUE, { noAck: true }),
     ).resolves.toBe(false);
+  });
+
+  it('rejects a reused Idempotency-Key with a different body with 422 problem+json', async () => {
+    const { user, product } = given(dataSource);
+    const buyer = await user();
+    const lamp = await product({ stock: 5 });
+    const body = (quantity: number) => ({
+      user_id: Number(buyer.id),
+      items: [{ product_id: Number(lamp.id), quantity }],
+    });
+
+    await api()
+      .post('/orders')
+      .set('Idempotency-Key', 'order-4')
+      .send(body(1))
+      .expect(201);
+    const response = await api()
+      .post('/orders')
+      .set('Idempotency-Key', 'order-4')
+      .send(body(2))
+      .expect(422);
+
+    expect(response.headers['content-type']).toContain(
+      'application/problem+json',
+    );
+    expect(response.body).toMatchObject({
+      status: 422,
+      title: 'Unprocessable Entity',
+      detail: 'Idempotency-Key was already used with a different request body',
+    });
+    const list = await api().get('/orders').expect(200);
+    expect(list.body.items).toHaveLength(1);
   });
 });
