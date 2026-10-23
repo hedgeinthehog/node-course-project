@@ -10,7 +10,8 @@
 
 Сам сервер — NestJS, дані в Postgres через TypeORM-репозиторії (`src/entities/`, ДЗ #13); на кордоні стоїть
 `express-openapi-validator` (запити й відповіді звіряються зі спекою, помилки віддаються як
-`application/problem+json`). Події домену йдуть у RabbitMQ (ДЗ #19, розділ «Async-події через RabbitMQ»).
+`application/problem+json`). Події домену йдуть у RabbitMQ через transactional outbox (ДЗ #19 і #22, розділи
+«Async-події через RabbitMQ» та «Outbox та ідемпотентність»).
 
 ## Вимоги
 
@@ -27,8 +28,9 @@ npm run build && npm run migrate && npm run events:topology && npm run seed
 npm start
 ```
 
-Сервер слухає `http://localhost:3000`. Споживач подій `order.placed` — окремий процес, у другому терміналі
-(він же оголошує топологію брокера при старті, тож `events:topology` потрібен лише щоб API стартував раніше за
+Сервер слухає `http://localhost:3000`; relay outbox-у працює всередині нього (`npm run relay` — той самий relay
+окремим процесом, для демо). Споживач подій `order.placed` — окремий процес, у другому терміналі (він же
+оголошує топологію брокера при старті, тож `events:topology` потрібен лише щоб API стартував раніше за
 споживача):
 
 ```bash
@@ -144,7 +146,7 @@ docker build -t myapp . && docker run --rm myapp ls -a /app && docker run --rm m
 | `/orders` | `GET /orders` (cursor-пагінація), `POST /orders` (Idempotency-Key), `GET /orders/{id}`, `PATCH /orders/{id}/status` (життєвий цикл), `GET /orders/{id}/events` (SSE) |
 
 - **Cursor-пагінація**: `?limit=&cursor=`, відповідь `{ items, next_cursor }`, `next_cursor: null` — сторінок більше немає. Курсор — непрозорий токен.
-- **Idempotency-Key**: обовʼязковий header на обох POST. Той самий ключ + те саме тіло → та сама відповідь `201` + `Idempotency-Replay: true`; той самий ключ + інше тіло → `422`.
+- **Idempotency-Key**: обовʼязковий header на обох POST. Той самий ключ + те саме тіло → та сама відповідь `201` + `Idempotency-Replay: true`; той самий ключ + інше тіло → `422`. Ключі живуть у таблиці `idempotency_keys` в одній транзакції з ресурсом (ДЗ #22).
 - **problem+json**: кожна помилка — `application/problem+json` зі схемою `Problem` (`type`, `title`, `status`, `detail`, `instance`).
 - Гроші — цілі копійки (`price_cents`, `total_cents`).
 - **Checkout** (`POST /orders`) — одна транзакція: атомарний декремент `stock` кожного товару, списання
@@ -295,6 +297,10 @@ jobs `tests` і `contract` описані в «Тестування»). Сам w
 | `orders.user_id → users` | `RESTRICT` | замовлення — фінансова історія, користувача з замовленнями не видаляють |
 | `products.seller_id → users` | `RESTRICT` | каталог не зникає разом із продавцем мовчки |
 
+`outbox`, `processed_messages` і `idempotency_keys` (ДЗ #22) зовнішніх ключів не мають свідомо: outbox-рядок —
+це вже відправлена назовні подія, inbox-позначка і ключ API-краю мають пережити видалення того, на що
+посилаються, інакше повтор доставки чи запиту після видалення знову застосує ефект.
+
 `order_items` — явна join-entity для M:N «замовлення—товари» з даними на звʼязку (`quantity`,
 `unit_price_cents` — ціна на момент покупки), а не `@ManyToMany`.
 
@@ -352,7 +358,8 @@ docker compose exec -T postgres psql -U postgres -d marketplace -Atc "SELECT (SE
    0 рядків → `INSUFFICIENT_STOCK` (або `PRODUCT_NOT_FOUND`), транзакція відкочується;
 2. `UPDATE users SET balance_cents = balance_cents - $total WHERE id = $u AND balance_cents >= $total RETURNING id`;
    0 рядків → `INSUFFICIENT_FUNDS`;
-3. `INSERT` у `orders`, `order_items` і задача `order_confirmation` у `tasks`.
+3. `INSERT` у `orders`, `order_items`, задача `order_confirmation` у `tasks` і рядок `outbox` з подією
+   `order.placed` (ДЗ #22).
 
 Будь-яка помилка до `COMMIT` відкочує все разом: замовлень-«сиріт», списаних без замовлення коштів чи
 зарезервованого без замовлення товару не буває. Блокування беруться в одному й тому самому порядку
@@ -586,8 +593,8 @@ compose для перших чотирьох команд не потрібен.
 
 | Команда | Що запускає | Результат прогону |
 | --- | --- | --- |
-| `npm run test:integration` | `test/integration/` — репозиторії, checkout, воркер, споживач `order.placed` проти Postgres і RabbitMQ у testcontainers | 5 наборів, 20 тестів |
-| `npm run test:e2e` | `test/e2e/` — повний `AppModule` через supertest: замовлення, realtime, публікація `order.placed` | 10 тестів |
+| `npm run test:integration` | `test/integration/` — репозиторії, checkout, воркер, outbox і relay, споживач `order.placed` проти Postgres і RabbitMQ у testcontainers | 6 наборів, 27 тестів |
+| `npm run test:e2e` | `test/e2e/` — повний `AppModule` через supertest: замовлення, ключ ідемпотентності, realtime, relay `order.placed` | 11 тестів |
 | `npm run test:contract` | `test/contract/consumer.pact-spec.ts` — consumer-тест, пише `pacts/*.json` | 3 interactions |
 | `npm run verify:provider` | `test/contract/provider.pact-spec.ts` — справжній застосунок проти контракту | 3 × `has a matching body (OK)` |
 
@@ -614,7 +621,7 @@ compose для перших чотирьох команд не потрібен.
 тестом**. Транзакція з `ROLLBACK` сюди не підходить: checkout і воркер самі відкривають транзакції й
 комітять, а тести гонки та `SKIP LOCKED` потребують кількох зʼєднань, які мають бачити закомічені дані
 одне одного. Контейнер на файл дав би ту саму чистоту, але коштує 2–3 секунди старту на кожен файл, тоді як
-`TRUNCATE` семи малих таблиць — мілісекунди. Повторний запуск зелений без чистки: кожен прогін отримує
+`TRUNCATE` десяти малих таблиць — мілісекунди. Повторний запуск зелений без чистки: кожен прогін отримує
 новий контейнер, а в межах прогону стан обнуляється перед кожним тестом. RabbitMQ — так само один контейнер
 на прогін (глобальний setup оголошує в ньому топологію), а тести, що читають черги, роблять `purgeQueue`
 робочої черги і DLQ перед кожним тестом.
@@ -634,8 +641,9 @@ compose для перших чотирьох команд не потрібен.
 | `orders.repository.int-spec.ts` | завантаження графа через JOIN, `ON DELETE CASCADE`, unique `(order_id, product_id)`, FK `RESTRICT`, агрегат «виторг по продавцях» (`JOIN` + `GROUP BY`) |
 | `checkout.int-spec.ts` | атомарність транзакції, повний відкат при нестачі коштів або товару, 20 конкурентних checkout на 5 одиниць без oversell |
 | `tasks-worker.int-spec.ts` | `FOR UPDATE SKIP LOCKED` (рівно один раз на трьох воркерах), повтор, `failed` після ліміту спроб із відкатом savepoint |
-| `order-placed-consumer.int-spec.ts` | справжній RabbitMQ: дубль події → один рядок `shipments`; ефект, що падає → три повтори через retry-чергу з паузою і DLQ з `rejected`; повідомлення поза контрактом → DLQ з `rejected` без повторів; crash-loop (`requeue` × 4) → DLQ з `delivery_limit` (ДЗ #19) |
-| `test/e2e/orders.e2e-spec.ts` | створити товар → оформити замовлення → прочитати обидва → повтор з тим самим `Idempotency-Key`; `400` без ключа, `404` на невідоме замовлення, `409` при нестачі товару; `POST /orders` публікує `order.placed` рівно один раз, повтор за ключем — не публікує (ДЗ #19) |
+| `order-placed-consumer.int-spec.ts` | справжній RabbitMQ: дубль події → один рядок `shipments` і одна позначка в `processed_messages`; ефект, що падає → три повтори через retry-чергу з паузою і DLQ з `rejected`; повідомлення поза контрактом → DLQ з `rejected` без повторів; crash-loop (`requeue` × 4) → DLQ з `delivery_limit` (ДЗ #19) |
+| `outbox.int-spec.ts` | замовлення і рядок outbox одним COMMIT; падіння після вставки в outbox відкочує обидва; ключ ідемпотентності: replay, `422` на інше тіло, пʼять паралельних запитів з одним ключем → одне замовлення, невдалий запит ключа не лишає; relay публікує по порядку і позначає `published_at`; падіння relay між publish і UPDATE → подія вдруге, ефект один, inbox з однією позначкою (ДЗ #22) |
+| `test/e2e/orders.e2e-spec.ts` | створити товар → оформити замовлення → прочитати обидва → повтор з тим самим `Idempotency-Key`; `400` без ключа, `404` на невідоме замовлення, `409` при нестачі товару, `422` на той самий ключ з іншим тілом; relay усередині API виносить `order.placed` рівно один раз, повтор за ключем — не публікує (ДЗ #19, #22) |
 | `test/e2e/realtime.e2e-spec.ts` | життєвий цикл статусів і `409`; SSE: `Last-Event-ID`, `400`/`403`/`404` для не-власника, нумерація після рестарту; WS: кімнати, `forbidden`/`unauthenticated` (ДЗ #18) |
 
 E2E піднімає `Test.createTestingModule({ imports: [AppModule] })` без підмін провайдерів. Налаштування
@@ -711,8 +719,8 @@ curl -s "$PACT_BROKER_URL/can-i-deploy?pacticipant=marketplace-web&version=$VERS
 
 ### CI
 
-`.github/workflows/ci.yml`: job `db` — compose-стенд (Postgres, PgBouncer, RabbitMQ), міграції, демо ДЗ #14 і
-ДЗ #19, бекап і drill; job `tests` — `test:integration` і `test:e2e`; job `contract` — pipeline контракту,
+`.github/workflows/ci.yml`: job `db` — compose-стенд (Postgres, PgBouncer, RabbitMQ), міграції, демо ДЗ #14,
+#19 і #22, бекап і drill; job `tests` — `test:integration` і `test:e2e`; job `contract` — pipeline контракту,
 де кожен тег ставить крок деплою, а не крок перевірки:
 
 1. `test:contract` → публікація контракту (`scripts/pact-broker.sh publish`);
@@ -903,15 +911,15 @@ DLQ і unrouted — classic durable: обсяг малий, а delivery-limit (�
 `order.placed:<orderId>`, тож повторна публікація тієї ж події (ретрай продюсера після втраченого confirm) має
 той самий id; за ним і за `orderId` споживач упізнає дубль.
 
-Подія виходить із бізнес-операції: `OrdersService.create` після коміту checkout публікує її через
-`EventPublisher` (`src/events/publisher.ts`) — confirm-канал (`createConfirmChannel`), `persistent: true`,
-`messageId = eventId`, `waitForConfirms()` до відповіді клієнту. Ідемпотентний повтор `POST /orders` з тим самим
-`Idempotency-Key` не публікує вдруге (E2E-тест). Між COMMIT і publish є щілина: якщо брокер недоступний саме тут,
-замовлення вже існує, а події немає — клієнт отримує `503`, повтор із тим самим ключем повертає `201` із
-замовленням, але подію до появи transactional outbox (ДЗ #22) доведеться відновлювати вручну. Якщо exchange не
+Подія виходить із бізнес-операції: `checkout` пише її в таблицю `outbox` тією самою транзакцією, що й
+замовлення, а в брокер її виносить relay (розділ «Outbox та ідемпотентність») через `EventPublisher`
+(`src/events/publisher.ts`) — confirm-канал (`createConfirmChannel`), `persistent: true`, `messageId =
+eventId`, `waitForConfirms()` до позначки `published_at`. Ідемпотентний повтор `POST /orders` з тим самим
+`Idempotency-Key` не створює другого рядка outbox, тож і не публікує вдруге (E2E-тест). Якщо exchange не
 оголошено, API не стартує (помилка з підказкою `npm run events:topology`), а не губить події в нікуди. Після
 обриву зʼєднання з брокером наступна публікація перепідключається сама; `/health` стан брокера не перевіряє —
-збій видно на публікації (`503`).
+недоступний брокер видно по рядках outbox із `published_at IS NULL` і зростанням `attempts`, клієнт API цього
+не помічає.
 
 ### Споживач
 
@@ -923,8 +931,8 @@ DLQ і unrouted — classic durable: обсяг малий, а delivery-limit (�
   round-trip на кожне повідомлення, а дефолтний 0 — перший споживач забирає всю чергу, другий простоює.
 - Ефект — створити відправлення: `INSERT INTO shipments (order_id, event_id) … ON CONFLICT (order_id) DO NOTHING
   RETURNING order_id` (міграція `Shipments`): природний ключ бізнес-операції, порожній `RETURNING` → дубль, ефект
-  пропущено. Сховище — та сама Postgres, тому дедуп переживає рестарт і працює між інстансами; `Set` у памʼяті
-  тут не рахувався б.
+  пропущено. Сховище — та сама Postgres, разом із позначкою в `processed_messages` (ДЗ #22), тому дедуп переживає
+  рестарт і працює між інстансами; `Set` у памʼяті тут не рахувався б.
 - Ефект не вдався (у демо — FK: замовлення не існує; у житті — моргання бази) → не `reject(requeue=true)`, бо
   миттєвий повтор пропалив би всі спроби за мілісекунди і відправив живу подію в DLQ, а **retry-черга з
   TTL**: споживач перекладає повідомлення в `fulfillment.order-placed.retry` з лічильником `x-retry`
@@ -939,9 +947,9 @@ DLQ і unrouted — classic durable: обсяг малий, а delivery-limit (�
   щоб його перезапустив супервізор; `SIGTERM`/`SIGINT` — коректне завершення (`cancel`, дочекатись in-flight,
   закрити канал).
 
-Щілини між «позначив оброблене» і «застосував ефект» тут немає — позначка і є ефектом (один `INSERT`); а от між
-ефектом і `ack` вона є, саме її показує `demo:duplicate`. Закривається вона не меншою щілиною, а спільною
-транзакцією позначки й ефекту (ДЗ #22).
+Позначка про обробку (`processed_messages`) і ефект (`shipments`) комітяться однією транзакцією (ДЗ #22), тож
+щілини між «позначив» і «застосував» немає; а от між ефектом і `ack` вона є, саме її показує `demo:duplicate`,
+і закриває її не менша щілина, а дедуп за `eventId` на наступній доставці.
 
 ### Чому at-least-once, а не exactly-once
 
@@ -968,11 +976,13 @@ DLQ за цей прогін, а `dlq-depth` — її повна глибина;
 буде `expired`, і це теж легальний DLQ), решта чисел довідкові. Дані створюються на місці (продавець,
 покупець, товар → `checkout`), `seed` не потрібен; потрібні лише міграції.
 
-`npm run demo:publish` — пʼять checkout → пʼять `order.placed` у чергу **до** старту споживача (`queued=5`:
-брокер зберігає до появи одержувача), далі споживач забирає все:
+`npm run demo:publish` — пʼять checkout → пʼять рядків outbox → один прохід relay у процесі демо (`relayed=5`)
+→ пʼять `order.placed` у черзі **до** старту споживача (`queued=5`: брокер зберігає до появи одержувача), далі
+споживач забирає все:
 
 ```
 published=5
+relayed=5
 queued=5
 delivered=5
 effect=5
@@ -1034,8 +1044,146 @@ dlq-depth=1
 - `dead-letter-strategy` — дефолтний `at-most-once`: перенесення в DLX не підтверджується. `at-least-once`
   вимагає `overflow: reject-publish` і без нього не вмикається мовчки — брокер відкочується на `at-most-once` і
   пише про це лише в лог.
-- Transactional outbox (база і брокер атомарно) і `processed_messages` в одній транзакції з ефектом — ДЗ #22;
+- Transactional outbox і `processed_messages` в одній транзакції з ефектом додано в ДЗ #22 (наступний розділ);
   Redis і BullMQ поверх тієї ж події — ДЗ #23.
+
+
+## Outbox та ідемпотентність
+
+У ДЗ #19 `OrdersService.create` публікувала `order.placed` одразу після COMMIT checkout — і між цими двома
+записами був проміжок, у який вміщається падіння процесу: замовлення є, події немає, і жоден ретрай цього не
+полагодить, бо спільного COMMIT у Postgres і RabbitMQ не існує. Тепер подія народжується в тій самій
+транзакції, що й замовлення, а назовні її виносить окремий relay. Рахунок за це — at-least-once доставка —
+оплачується ідемпотентністю на трьох рівнях.
+
+### Таблиця outbox
+
+Міграція `Outbox` (`src/migrations/*-Outbox.ts`, не `synchronize`) створює три таблиці:
+
+| Таблиця | Поля | Навіщо |
+| --- | --- | --- |
+| `outbox` | `id`, `aggregate_type`, `aggregate_id`, `type`, `payload jsonb`, `created_at`, `published_at` (NULL = ще не винесено), `attempts`; частковий індекс `idx_outbox_unpublished (created_at, id) WHERE published_at IS NULL` | ролі полів — ті самі, що читає Debezium Outbox Event Router; імена колонок snake_case, тож при переході на CDC їх треба буде або перейменувати на `aggregatetype`/`aggregateid`, або задати `route.by.field=aggregate_type` і `table.field.event.key=aggregate_id` |
+| `processed_messages` | `message_id uuid`, `consumer text`, `processed_at`; PK `(message_id, consumer)` | inbox споживача: позначка «цей `eventId` цей консюмер уже обробив» |
+| `idempotency_keys` | `key text` PK, `fingerprint`, `result jsonb`, `created_at` | ключі ідемпотентності API-краю, переживають рестарт і спільні для всіх інстансів |
+
+Чистка: `outbox` росте разом із замовленнями, а частковий індекс relay цього не помічає — у ньому лише
+`published_at IS NULL`, тож він лишається малим; опубліковані рядки прибираються періодично, наприклад
+`DELETE FROM outbox WHERE published_at < now() - interval '7 days'` (cron поруч із `backup.cron`); до CDC ці
+рядки більше нікому не потрібні.
+
+### Бізнес-запис і outbox одним COMMIT
+
+`checkout()` (`src/checkout/checkout.ts`) тепер приймає `DataSource` **або** `EntityManager` і в тій самій
+транзакції, що списує залишок, знімає гроші й створює замовлення, вставляє рядок `outbox` з `payload =
+orderPlaced(toOrderDto(order))` — явною функцією контракту, а не сутністю через spread. Жодного `publish`
+усередині транзакції: брокер не вміє відкочуватись, а Postgres — вміє, тож усе, що має зникнути разом із
+замовленням, живе в базі. Це і показує `demo:crash-write`.
+
+### Relay на polling
+
+`OutboxRelay` (`src/events/relay.ts`) раз на `RELAY_INTERVAL_MS` = 1 с робить одну транзакцію:
+`SELECT … FROM outbox WHERE published_at IS NULL ORDER BY created_at, id FOR UPDATE SKIP LOCKED LIMIT 100` →
+для кожного рядка `publish` (confirm-канал, `messageId = eventId`) → `UPDATE outbox SET published_at = now(),
+attempts = attempts + 1` → COMMIT. `SKIP LOCKED`, а не голий `FOR UPDATE`: кілька relay (два інстанси API)
+беруть різні рядки замість того, щоб вишикуватись за одним локом. Relay живе всередині API (`EventsModule`
+стартує його в `onModuleInit`), тому `npm start` виносить події сам; `npm run relay` — той самий код окремим
+процесом, його використовують демо.
+
+Порядок publish → UPDATE міняти не можна. Якщо спершу позначити `published_at`, а потім публікувати, відмова
+publish (або падіння між ними) дасть рядок «винесено», якого брокер не бачив — це втрата, і її не лікує ніщо.
+У поточному порядку падіння між publish і UPDATE відкочує транзакцію, `published_at` лишається NULL, і
+наступний прохід публікує подію **вдруге** — це дубль, і його лікує дедуплікація на споживачі. Вибір тут не між
+«добре» і «погано», а між дублем і втратою; дубль дешевший. Те саме стосується помилки publish: відповідь
+брокера могла загубитись, подія вже може бути в черзі, тому relay лише збільшує `attempts` і пробує знову, а
+дедуп на споживачі обовʼязковий незалежно від акуратності relay.
+
+Порядок доставки `ORDER BY created_at, id` задає лише порядок вибірки: `SKIP LOCKED` розкидає рядки між
+воркерами, а `bigserial` видає номер на `nextval`, видимим же рядок стає на COMMIT, — тому в relay стоїть
+`published_at IS NULL`, а не курсор «усе більше за останній id». Гарантованого порядку між подіями тут немає і
+він не потрібен: `order.placed` для одного замовлення рівно одна.
+
+### Ідемпотентність на трьох рівнях
+
+1. **Природний ключ ефекту.** Відправлення створюється `INSERT INTO shipments (order_id, …) ON CONFLICT
+   (order_id) DO NOTHING` (`src/events/consumer.ts`): повтор нічого не змінює, бо ключ — це сама
+   бізнес-операція. `UPDATE stock = stock - 1` тут не пройшов би — друга доставка зняла б удвічі.
+2. **Inbox.** Той самий споживач у тій самій транзакції спершу робить `INSERT INTO processed_messages
+   (message_id, consumer) ON CONFLICT DO NOTHING RETURNING`; порожній `RETURNING` — дубль, ефект пропущено;
+   інакше ефект і позначка комітяться разом. Позначити в Redis, а ефект записати в Postgres було б тим самим
+   dual write, тільки на споживачі.
+3. **Ключ ідемпотентності на API-краю.** `IdempotencyStore` (`src/common/idempotency.ts`) більше не в памʼяті
+   процесу: `INSERT INTO idempotency_keys (key, fingerprint) ON CONFLICT (key) DO NOTHING RETURNING` відкриває
+   ту саму транзакцію, в якій далі йде checkout, і `result` записується туди ж перед COMMIT. Повторний запит із
+   тим самим ключем бачить рядок і повертає збережену відповідь з `Idempotency-Replay: true`; одночасні запити
+   з одним ключем вишиковуються на цьому INSERT (другий чекає COMMIT першого) — інтеграційний тест ганяє
+   пʼять паралельних; той самий ключ з іншим тілом — `422`; запит, що впав, рядка не лишає, і ключ можна
+   повторити. Ключ ідентифікує намір, а не тіло: два однакові замовлення з різними ключами — два замовлення,
+   хеш тіла схлопнув би їх в одне. `fingerprint` потрібен лише щоб відрізнити помилку клієнта.
+
+### Демо
+
+Три скрипти (`src/demo-outbox.ts`, `src/demo-crash-write.ts`, `src/demo-crash-relay.ts`) на тому самому
+харнесі, що й ДЗ #19: через `scripts/with-secrets.sh dev`, самоочисні (топологія, `purgeQueue` робочої і
+retry-черги), споживач і relay — дочірні процеси (`fork(dist/consumer.js)` / `fork(dist/relay.js)`, звітують
+стадії через IPC), підсумок `ключ=число`, exit ≠ 0 при порушеному інваріанті. Дані створюються на місці,
+`seed` не потрібен, лише міграції.
+
+`npm run demo:outbox` — два `placeOrder` з одним `Idempotency-Key`, далі relay і споживач:
+
+```
+requests=2
+replayed=1
+same-order=1
+orders=1
+outbox=1
+published=1
+deliveries=1
+effect=1
+processed=1
+work=0
+dlq=0
+```
+
+`npm run demo:crash-write` — транзакція з `checkout` падає **після** вставки рядка в outbox (усередині
+транзакції рядок видно: `outbox-in-transaction=1`), далі relay робить два проходи, споживач чекає 1,5 с:
+
+```
+write-failed=1
+outbox-in-transaction=1
+orders=0
+outbox=0
+published=0
+deliveries=0
+effect=0
+work=0
+```
+
+`npm run demo:crash-relay` — обрана форма: **справжній kill -9 дочірнього relay**. Перший relay запускається з
+`RELAY_CRASH_AFTER_PUBLISH=1` і після підтвердженого `publish`, до `UPDATE published_at`, убиває власний процес
+`SIGKILL`; транзакція відкочується, рядок лишається з `published_at IS NULL` (`published-after-crash=0`).
+Другий relay публікує подію вдруге; споживач отримує дві доставки, перша створює відправлення, друга впирається
+в `processed_messages`:
+
+```
+outbox=1
+published-after-crash=0
+published=1
+relay-runs=2
+deliveries=2
+applied=1
+skipped=1
+effect=1
+processed=1
+work=0
+dlq=0
+```
+
+Той самий сценарій живе й інтеграційним тестом на testcontainers (`test/integration/outbox.int-spec.ts`): там
+«падіння» — виняток рівно в тій самій точці (`afterPublish` кидає), як крок 8 у коді лекції.
+
+Exactly-once доставки не існує — це задача двох генералів. Є at-least-once доставка (outbox + relay, який
+краще повторить, ніж загубить) плюс ідемпотентний ефект (природний ключ + inbox в одній транзакції), і разом
+вони дають exactly-once **результат**.
 
 
 ## Grading
@@ -1086,6 +1234,11 @@ bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
 пароль можна задати змінною `BROKER_PASSWORD` при першому `docker compose up` — так робить CI. Статичні
 перевірки (DLX і `prefetch` у коді, обгортка в `demo:*`, розділ `## Grading`, відсутність env-файлів із живими
 URL) не потребують ні стенда, ні сховища.
+
+ДЗ #22 (ті самі `export` і `npm ci && npm run build && npm run migrate` з блоку вище; `seed` не потрібен):
+`npm run demo:outbox`, `npm run demo:crash-write`, `npm run demo:crash-relay`. Брокер — RabbitMQ зі стенда
+(`BROKER_URL`, схема `amqp`, порт `5672`), база — `DB_*` через PgBouncer; relay і споживач демо запускають
+самі дочірніми процесами, `npm start` для демо не потрібен.
 
 ## Перевірки
 

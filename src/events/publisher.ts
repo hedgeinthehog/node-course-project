@@ -12,6 +12,7 @@ const reason = (err: unknown) =>
 export class EventPublisher implements OnModuleInit, OnModuleDestroy {
   private connection: ChannelModel | null = null;
   private channel: ConfirmChannel | null = null;
+  private opening: Promise<ConfirmChannel> | null = null;
 
   constructor(
     private readonly url: string,
@@ -54,7 +55,14 @@ export class EventPublisher implements OnModuleInit, OnModuleDestroy {
     await connection?.close();
   }
 
-  private async open(): Promise<ConfirmChannel> {
+  private open(): Promise<ConfirmChannel> {
+    this.opening ??= this.connectAndCheck().finally(() => {
+      this.opening = null;
+    });
+    return this.opening;
+  }
+
+  private async connectAndCheck(): Promise<ConfirmChannel> {
     let connection: ChannelModel;
     try {
       connection = await amqp.connect(this.url);
