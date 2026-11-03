@@ -6,7 +6,14 @@ import { buildPage, decodeCursor, Page } from '../common/pagination';
 import { Product } from '../entities/product.entity';
 import { User } from '../entities/user.entity';
 import { CreateProductDto } from './dto/create-product.dto';
+import { CacheAside } from '../redis/cache-aside';
 import { ProductDto, toProductDto } from './dto/product.dto';
+import {
+  loadProductCard,
+  PRODUCT_CARD_TTL,
+  ProductCardDto,
+  productCardKey,
+} from './product-card';
 
 @Injectable()
 export class ProductsService {
@@ -15,7 +22,8 @@ export class ProductsService {
   constructor(
     @InjectRepository(Product)
     private readonly products: Repository<Product>,
-    dataSource: DataSource,
+    private readonly dataSource: DataSource,
+    private readonly cache: CacheAside,
   ) {
     this.idempotency = new IdempotencyStore(dataSource);
   }
@@ -48,11 +56,15 @@ export class ProductsService {
     return buildPage(rows.map(toProductDto), limit);
   }
 
-  async findOne(id: string): Promise<ProductDto> {
-    const product = await this.products.findOneBy({ id });
-    if (!product) {
+  async findOne(id: string): Promise<ProductCardDto> {
+    const card = await this.cache.getOrLoad(
+      productCardKey(id),
+      () => loadProductCard(this.dataSource, id),
+      PRODUCT_CARD_TTL,
+    );
+    if (!card) {
       throw new NotFoundException(`Product ${id} not found`);
     }
-    return toProductDto(product);
+    return card;
   }
 }

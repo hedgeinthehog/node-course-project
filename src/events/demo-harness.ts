@@ -49,6 +49,62 @@ export async function until(
 export const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+export async function newBuyer(dataSource: DataSource): Promise<Buyer> {
+  const users = dataSource.getRepository(User);
+  const run = randomUUID();
+  const seller = await users.save(
+    users.create({ email: `seller-${run}@demo.local`, name: 'Demo seller' }),
+  );
+  const buyer = await users.save(
+    users.create({
+      email: `buyer-${run}@demo.local`,
+      name: 'Demo buyer',
+      balanceCents: '100000',
+    }),
+  );
+  const products = dataSource.getRepository(Product);
+  const product = await products.save(
+    products.create({
+      sellerId: seller.id,
+      name: `Demo product ${run}`,
+      description: 'created by an events demo',
+      priceCents: 2500,
+      stock: 5,
+    }),
+  );
+  return {
+    buyerId: Number(buyer.id),
+    dto: {
+      user_id: Number(buyer.id),
+      items: [{ product_id: Number(product.id), quantity: 1 }],
+    },
+  };
+}
+
+export async function newProducts(
+  dataSource: DataSource,
+  count: number,
+): Promise<number[]> {
+  const users = dataSource.getRepository(User);
+  const run = randomUUID();
+  const seller = await users.save(
+    users.create({ email: `seller-${run}@demo.local`, name: 'Demo seller' }),
+  );
+  const products = dataSource.getRepository(Product);
+  const saved = await products.save(
+    Array.from({ length: count }, (_, i) =>
+      products.create({
+        sellerId: seller.id,
+        name: `Demo product ${run} #${i + 1}`,
+        description: 'created by a cache demo',
+        priceCents: 1000 + i,
+        stock: 10,
+      }),
+    ),
+  );
+  return saved.map((product) => Number(product.id));
+}
+
 export class SupervisedProcess<T> {
   readonly signals: T[] = [];
   readonly exited: Promise<{ code: number | null; signal: string | null }>;
@@ -111,40 +167,16 @@ export class Harness {
     private readonly deadLettersBefore: number,
   ) {}
 
-  async newBuyer(): Promise<Buyer> {
-    const users = this.dataSource.getRepository(User);
-    const run = randomUUID();
-    const seller = await users.save(
-      users.create({ email: `seller-${run}@demo.local`, name: 'Demo seller' }),
-    );
-    const buyer = await users.save(
-      users.create({
-        email: `buyer-${run}@demo.local`,
-        name: 'Demo buyer',
-        balanceCents: '100000',
-      }),
-    );
-    const products = this.dataSource.getRepository(Product);
-    const product = await products.save(
-      products.create({
-        sellerId: seller.id,
-        name: `Demo product ${run}`,
-        description: 'created by an events demo',
-        priceCents: 2500,
-        stock: 5,
-      }),
-    );
-    return {
-      buyerId: Number(buyer.id),
-      dto: {
-        user_id: Number(buyer.id),
-        items: [{ product_id: Number(product.id), quantity: 1 }],
-      },
-    };
+  newBuyer(): Promise<Buyer> {
+    return newBuyer(this.dataSource);
+  }
+
+  newProducts(count: number): Promise<number[]> {
+    return newProducts(this.dataSource, count);
   }
 
   async placeOrder(key = `demo-${randomUUID()}`): Promise<OrderDto> {
-    const { dto } = await this.newBuyer();
+    const { dto } = await newBuyer(this.dataSource);
     return (await placeOrder(this.dataSource, key, dto)).result;
   }
 

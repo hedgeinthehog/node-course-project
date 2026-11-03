@@ -14,13 +14,15 @@ jobs:
       DB_NAME: marketplace
       BROKER_PASSWORD: ${{ secrets.BROKER_PASSWORD || 'marketplace_dev' }}
       BROKER_URL: amqp://marketplace:${{ secrets.BROKER_PASSWORD || 'marketplace_dev' }}@127.0.0.1:5672
+      REDIS_URL: redis://127.0.0.1:6379
+      REDIS_QUEUE_URL: redis://127.0.0.1:6382
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - run: docker compose up -d --wait postgres pgbouncer rabbitmq
+      - run: docker compose up -d --wait postgres pgbouncer rabbitmq redis-cache redis-queue
       - run: npm ci
       - run: npx tsc --noEmit
       - run: npm run lint
@@ -38,6 +40,10 @@ jobs:
       - run: npm run demo:crash-write
       - run: npm run demo:crash-relay
       - run: npm run prune
+      - run: npm run demo:cache
+      - run: npm run demo:session
+      - run: npm run demo:ratelimit
+      - run: npm run demo:queue
       - run: bash scripts/with-secrets.sh dev bash scripts/backup.sh
       - run: bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
       - run: npx redocly lint openapi/openapi.yaml

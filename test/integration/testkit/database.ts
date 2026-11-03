@@ -1,3 +1,4 @@
+import Redis from 'ioredis';
 import { DataSource } from 'typeorm';
 import { entities } from '../../../src/entities';
 
@@ -41,6 +42,14 @@ export async function resetDatabase(dataSource: DataSource) {
     .map((meta) => `"${meta.tableName}"`)
     .join(', ');
   await dataSource.query(`TRUNCATE TABLE ${tables} RESTART IDENTITY CASCADE`);
+  await flushRedis();
+}
+
+async function flushRedis() {
+  const redis = new Redis(process.env.REDIS_URL!, { lazyConnect: true });
+  await redis.connect();
+  await redis.flushall();
+  await redis.quit();
 }
 
 export function pgError(code: string) {

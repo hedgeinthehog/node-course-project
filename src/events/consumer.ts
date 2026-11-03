@@ -24,6 +24,7 @@ export type ConsumerSignal =
 
 export interface ConsumerOptions {
   observe?: (signal: ConsumerSignal) => void | Promise<void>;
+  afterEffect?: (event: OrderPlacedEvent) => void | Promise<void>;
   onClose?: (reason: string) => void;
 }
 
@@ -75,7 +76,7 @@ function scheduleRetry(
 export async function startConsumer(
   connection: ChannelModel,
   dataSource: DataSource,
-  { observe = () => undefined, onClose }: ConsumerOptions = {},
+  { observe = () => undefined, afterEffect, onClose }: ConsumerOptions = {},
 ): Promise<RunningConsumer> {
   let stopping = false;
   const closed = (reason: string) => {
@@ -124,6 +125,7 @@ export async function startConsumer(
     let applied: boolean;
     try {
       applied = await applyOrderPlaced(dataSource, event);
+      await afterEffect?.(event);
     } catch (err) {
       const error = (err as Error).message;
       if (retries < MAX_RETRIES) {

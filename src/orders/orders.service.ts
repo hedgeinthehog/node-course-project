@@ -9,6 +9,8 @@ import { CheckoutError } from '../checkout/checkout';
 import { buildPage, decodeCursor, Page } from '../common/pagination';
 import { OrderItem } from '../entities/order-item.entity';
 import { Order } from '../entities/order.entity';
+import { productCardKey } from '../products/product-card';
+import { CacheAside } from '../redis/cache-aside';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { OrderDto, toOrderDto } from './dto/order.dto';
 import { OrderEventsService } from './order-events.service';
@@ -22,11 +24,20 @@ export class OrdersService {
     private readonly orders: Repository<Order>,
     private readonly dataSource: DataSource,
     private readonly events: OrderEventsService,
+    private readonly cache: CacheAside,
   ) {}
 
   async create(key: string, dto: CreateOrderDto) {
     try {
-      return await placeOrder(this.dataSource, key, dto);
+      const outcome = await placeOrder(this.dataSource, key, dto);
+      if (!outcome.replayed) {
+        await this.cache.invalidate(
+          ...outcome.result.items.map((item) =>
+            productCardKey(item.product_id),
+          ),
+        );
+      }
+      return outcome;
     } catch (err) {
       if (err instanceof CheckoutError) {
         throw err.code === 'USER_NOT_FOUND' || err.code === 'PRODUCT_NOT_FOUND'

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PostgreSqlContainer } from '@testcontainers/postgresql';
 import { RabbitMQContainer } from '@testcontainers/rabbitmq';
+import { GenericContainer, Wait } from 'testcontainers';
 import amqp from 'amqplib';
 import { DataSource } from 'typeorm';
 import { entities } from '../../../src/entities';
@@ -10,11 +11,16 @@ import { declareTopology } from '../../../src/events/topology';
 
 const POSTGRES_IMAGE = 'postgres:16-alpine';
 const RABBITMQ_IMAGE = 'rabbitmq:4.2-alpine';
+const REDIS_IMAGE = 'redis:8-alpine';
 
 export default async function globalSetup() {
-  const [container, broker] = await Promise.all([
+  const [container, broker, redis] = await Promise.all([
     new PostgreSqlContainer(POSTGRES_IMAGE).start(),
     new RabbitMQContainer(RABBITMQ_IMAGE).start(),
+    new GenericContainer(REDIS_IMAGE)
+      .withExposedPorts(6379)
+      .withWaitStrategy(Wait.forLogMessage('Ready to accept connections'))
+      .start(),
   ]);
 
   const dataSource = new DataSource({
@@ -42,7 +48,9 @@ export default async function globalSetup() {
   process.env.DB_URL = `postgres://${container.getHost()}:${container.getPort()}/${container.getDatabase()}`;
   process.env.DB_PASSWORD_FILE = secretFile;
   process.env.BROKER_URL = broker.getAmqpUrl();
+  process.env.REDIS_URL = `redis://${redis.getHost()}:${redis.getMappedPort(6379)}`;
+  process.env.REDIS_QUEUE_URL = process.env.REDIS_URL;
   Object.assign(globalThis, {
-    __TEST_DATABASE__: { container, broker, secretDir },
+    __TEST_DATABASE__: { container, broker, redis, secretDir },
   });
 }
