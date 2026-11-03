@@ -31,17 +31,27 @@ export interface RunningConsumer {
   stop(): Promise<void>;
 }
 
-export async function applyOrderPlaced(
+export const CONSUMER_NAME = 'fulfillment';
+
+export function applyOrderPlaced(
   dataSource: DataSource,
   event: OrderPlacedEvent,
 ): Promise<boolean> {
-  const inserted: { order_id: string }[] = await dataSource.query(
-    `INSERT INTO shipments (order_id, event_id) VALUES ($1, $2)
-     ON CONFLICT (order_id) DO NOTHING
-     RETURNING order_id`,
-    [event.payload.orderId, event.eventId],
-  );
-  return inserted.length === 1;
+  return dataSource.transaction(async (manager) => {
+    const marked: { message_id: string }[] = await manager.query(
+      `INSERT INTO processed_messages (message_id, consumer) VALUES ($1, $2)
+       ON CONFLICT DO NOTHING
+       RETURNING message_id`,
+      [event.eventId, CONSUMER_NAME],
+    );
+    if (marked.length === 0) return false;
+    await manager.query(
+      `INSERT INTO shipments (order_id, event_id) VALUES ($1, $2)
+       ON CONFLICT (order_id) DO NOTHING`,
+      [event.payload.orderId, event.eventId],
+    );
+    return true;
+  });
 }
 
 function scheduleRetry(

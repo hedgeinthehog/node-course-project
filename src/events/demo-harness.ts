@@ -4,15 +4,16 @@ import { join } from 'node:path';
 import amqp from 'amqplib';
 import type { Channel, ChannelModel, ConsumeMessage } from 'amqplib';
 import { DataSource } from 'typeorm';
-import { checkout } from '../checkout/checkout';
 import { parseBrokerUrl } from '../config/env.schema';
 import { dataSourceOptions } from '../data-source';
 import { Product } from '../entities/product.entity';
 import { User } from '../entities/user.entity';
-import { OrderDto, toOrderDto } from '../orders/dto/order.dto';
+import { CreateOrderDto } from '../orders/dto/create-order.dto';
+import { OrderDto } from '../orders/dto/order.dto';
+import { placeOrder } from '../orders/place-order';
 import { ConsumerSignal } from './consumer';
-import { orderPlaced } from './order-placed';
 import { EventPublisher } from './publisher';
+import { OutboxRelay, RelayRun } from './relay';
 import {
   DEAD_LETTER_QUEUE,
   declareTopology,
@@ -21,6 +22,15 @@ import {
 } from './topology';
 
 const POLL_MS = 50;
+
+export type RelaySignal =
+  | { stage: 'published'; id: string; eventId: string }
+  | ({ stage: 'polled' } & RelayRun);
+
+export interface Buyer {
+  buyerId: number;
+  dto: CreateOrderDto;
+}
 
 export async function until(
   check: () => boolean | Promise<boolean>,
@@ -36,24 +46,25 @@ export async function until(
   }
 }
 
-export class ConsumerProcess {
-  readonly signals: ConsumerSignal[] = [];
+export const sleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+export class SupervisedProcess<T> {
+  readonly signals: T[] = [];
   readonly exited: Promise<{ code: number | null; signal: string | null }>;
 
   constructor(private readonly child: ChildProcess) {
-    child.on('message', (signal) =>
-      this.signals.push(signal as ConsumerSignal),
-    );
+    child.on('message', (signal) => this.signals.push(signal as T));
     this.exited = new Promise((resolve) =>
       child.once('exit', (code, signal) => resolve({ code, signal })),
     );
   }
 
-  count(predicate: (signal: ConsumerSignal) => boolean): number {
+  count(predicate: (signal: T) => boolean): number {
     return this.signals.filter(predicate).length;
   }
 
-  waitFor(predicate: (signals: ConsumerSignal[]) => boolean, what: string) {
+  waitFor(predicate: (signals: T[]) => boolean, what: string) {
     return until(() => predicate(this.signals), what);
   }
 
@@ -100,7 +111,7 @@ export class Harness {
     private readonly deadLettersBefore: number,
   ) {}
 
-  async placeOrder(): Promise<OrderDto> {
+  async newBuyer(): Promise<Buyer> {
     const users = this.dataSource.getRepository(User);
     const run = randomUUID();
     const seller = await users.save(
@@ -120,18 +131,25 @@ export class Harness {
         name: `Demo product ${run}`,
         description: 'created by an events demo',
         priceCents: 2500,
-        stock: 1,
+        stock: 5,
       }),
     );
-    const order = await checkout(this.dataSource, {
-      userId: buyer.id,
-      items: [{ productId: product.id, quantity: 1 }],
-    });
-    return toOrderDto(order);
+    return {
+      buyerId: Number(buyer.id),
+      dto: {
+        user_id: Number(buyer.id),
+        items: [{ product_id: Number(product.id), quantity: 1 }],
+      },
+    };
   }
 
-  publish(order: OrderDto) {
-    return this.publisher.publish(orderPlaced(order));
+  async placeOrder(key = `demo-${randomUUID()}`): Promise<OrderDto> {
+    const { dto } = await this.newBuyer();
+    return (await placeOrder(this.dataSource, key, dto)).result;
+  }
+
+  relay(): Promise<RelayRun> {
+    return new OutboxRelay(this.dataSource, this.publisher).runOnce();
   }
 
   async depth(queue: string): Promise<number> {
@@ -166,21 +184,57 @@ export class Harness {
     return seen;
   }
 
-  async shipments(orderIds: number[]): Promise<number> {
-    const [{ count }]: { count: number }[] = await this.dataSource.query(
-      `SELECT count(*)::int AS count FROM shipments WHERE order_id = ANY($1)`,
-      [orderIds],
+  async ordersOf(buyerId: number): Promise<number> {
+    return this.scalar(
+      `SELECT count(*)::int AS value FROM orders WHERE user_id = $1`,
+      [buyerId],
     );
-    return count;
   }
 
-  spawnConsumer(env: Record<string, string> = {}): ConsumerProcess {
-    return new ConsumerProcess(
-      fork(join(__dirname, '..', 'consumer.js'), [], {
-        env: { ...process.env, ...env },
-        stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
-      }),
+  async outboxOf(
+    buyerId: number,
+  ): Promise<{ total: number; published: number }> {
+    const [row]: { total: number; published: number }[] =
+      await this.dataSource.query(
+        `SELECT count(*)::int AS total,
+                count(published_at)::int AS published
+         FROM outbox
+         WHERE aggregate_type = 'order'
+           AND (payload -> 'payload' ->> 'userId')::bigint = $1`,
+        [buyerId],
+      );
+    return row;
+  }
+
+  async shipmentsOf(buyerId: number): Promise<number> {
+    return this.scalar(
+      `SELECT count(*)::int AS value
+       FROM shipments s JOIN orders o ON o.id = s.order_id
+       WHERE o.user_id = $1`,
+      [buyerId],
     );
+  }
+
+  shipments(orderIds: number[]): Promise<number> {
+    return this.scalar(
+      `SELECT count(*)::int AS value FROM shipments WHERE order_id = ANY($1)`,
+      [orderIds],
+    );
+  }
+
+  processed(eventIds: string[]): Promise<number> {
+    return this.scalar(
+      `SELECT count(*)::int AS value FROM processed_messages WHERE message_id = ANY($1::uuid[])`,
+      [eventIds],
+    );
+  }
+
+  spawnConsumer(env: Record<string, string> = {}) {
+    return this.spawn<ConsumerSignal>('consumer.js', env);
+  }
+
+  spawnRelay(env: Record<string, string> = {}) {
+    return this.spawn<RelaySignal>('relay.js', env);
   }
 
   async close(): Promise<void> {
@@ -188,6 +242,28 @@ export class Harness {
     await this.connection.close();
     await this.dataSource.destroy();
   }
+
+  private spawn<T>(script: string, env: Record<string, string>) {
+    return new SupervisedProcess<T>(
+      fork(join(__dirname, '..', script), [], {
+        env: { ...process.env, ...env },
+        stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
+      }),
+    );
+  }
+
+  private async scalar(sql: string, params: unknown[]): Promise<number> {
+    const [{ value }]: { value: number }[] = await this.dataSource.query(
+      sql,
+      params,
+    );
+    return value;
+  }
+}
+
+export function ownedBy(ids: Set<string>) {
+  return (signal: { eventId: string | null }) =>
+    signal.eventId !== null && ids.has(signal.eventId);
 }
 
 export function summary(values: Record<string, string | number>) {

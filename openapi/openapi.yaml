@@ -254,14 +254,6 @@ paths:
                 $ref: '#/components/schemas/Problem'
         '422':
           $ref: '#/components/responses/IdempotencyConflict'
-        '503':
-          description: >-
-            The order is placed, but the event bus was unavailable and `order.placed` was not
-            published. Retrying with the same Idempotency-Key replays the created order.
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
         default:
           $ref: '#/components/responses/UnexpectedError'
 

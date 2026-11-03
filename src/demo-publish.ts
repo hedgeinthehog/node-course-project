@@ -1,5 +1,6 @@
 import { PREFETCH } from './events/consumer';
-import { finish, Harness, summary } from './events/demo-harness';
+import { finish, Harness, ownedBy, summary } from './events/demo-harness';
+import { orderPlaced } from './events/order-placed';
 import { DEAD_LETTER_QUEUE, ORDER_PLACED_QUEUE } from './events/topology';
 import type { OrderDto } from './orders/dto/order.dto';
 
@@ -10,22 +11,26 @@ async function main() {
 
   const orders: OrderDto[] = [];
   for (let i = 0; i < EVENTS; i++) {
-    const order = await harness.placeOrder();
-    await harness.publish(order);
-    orders.push(order);
+    orders.push(await harness.placeOrder());
   }
+  const ours = new Set(orders.map((order) => orderPlaced(order).eventId));
+  const relayed = (await harness.relay()).published;
   const queued = await harness.depth(ORDER_PLACED_QUEUE);
 
   const consumer = harness.spawnConsumer();
   await consumer.waitFor(
-    (signals) => signals.filter((s) => s.stage === 'settled').length >= EVENTS,
+    (signals) =>
+      signals.filter((s) => s.stage === 'settled' && ownedBy(ours)(s)).length >=
+      EVENTS,
     `${EVENTS} settled deliveries`,
   );
   await consumer.stop();
 
-  const delivered = consumer.count((s) => s.stage === 'delivered');
+  const delivered = consumer.count(
+    (s) => s.stage === 'delivered' && ownedBy(ours)(s),
+  );
   const acked = consumer.count(
-    (s) => s.stage === 'settled' && s.outcome === 'ack',
+    (s) => s.stage === 'settled' && s.outcome === 'ack' && ownedBy(ours)(s),
   );
   const effect = await harness.shipments(orders.map((order) => order.id));
   const work = await harness.depth(ORDER_PLACED_QUEUE);
@@ -35,6 +40,7 @@ async function main() {
 
   summary({
     published: EVENTS,
+    relayed,
     queued,
     delivered,
     effect,

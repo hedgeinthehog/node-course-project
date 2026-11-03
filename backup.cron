@@ -1,2 +1,3 @@
 PATH=/usr/local/bin:/usr/bin:/bin
 0 3 * * * cd /srv/marketplace-api && mkdir -p backups && bash scripts/with-secrets.sh prod bash scripts/backup.sh >> backups/backup.log 2>&1
+30 3 * * * cd /srv/marketplace-api && mkdir -p backups && bash scripts/with-secrets.sh prod node dist/prune.js >> backups/prune.log 2>&1

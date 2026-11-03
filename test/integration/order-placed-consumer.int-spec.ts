@@ -1,6 +1,7 @@
 import amqp from 'amqplib';
 import type { Channel, ChannelModel } from 'amqplib';
 import { DataSource } from 'typeorm';
+import { ProcessedMessage } from '../../src/entities/processed-message.entity';
 import { Shipment } from '../../src/entities/shipment.entity';
 import {
   ConsumerSignal,
@@ -110,6 +111,9 @@ describe('order.placed consumer', () => {
         status: 'pending',
       }),
     ]);
+    await expect(
+      dataSource.getRepository(ProcessedMessage).count(),
+    ).resolves.toBe(1);
   });
 
   it('retries a failing effect through the delayed retry queue and dead-letters it after the retry limit', async () => {

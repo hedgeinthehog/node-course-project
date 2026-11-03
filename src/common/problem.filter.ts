@@ -6,6 +6,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
+import { IdempotencyKeyReuseError } from './idempotency';
 
 interface ValidatorError {
   status?: number;
@@ -36,6 +37,9 @@ export class ProblemFilter implements ExceptionFilter {
 
     if (exception instanceof HttpException) {
       status = exception.getStatus();
+      detail = exception.message;
+    } else if (exception instanceof IdempotencyKeyReuseError) {
+      status = HttpStatus.UNPROCESSABLE_ENTITY;
       detail = exception.message;
     } else if (isValidatorError(exception)) {
       status = exception.status ?? status;
