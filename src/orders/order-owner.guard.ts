@@ -9,28 +9,23 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { WsException } from '@nestjs/websockets';
-import type { Request } from 'express';
 import type { Socket } from 'socket.io';
 import { Repository } from 'typeorm';
+import { AuthService, Principal } from '../auth/auth.service';
+import { AuthenticatedRequest } from '../auth/decorators';
 import { Order } from '../entities/order.entity';
-
-export const USER_ID_HEADER = 'x-user-id';
-
-interface Principal {
-  userId: string | null;
-  orderId: string;
-}
 
 @Injectable()
 export class OrderOwnerGuard implements CanActivate {
   constructor(
     @InjectRepository(Order)
     private readonly orders: Repository<Order>,
+    private readonly auth: AuthService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    const { userId, orderId } = this.identify(context);
-    if (userId === null) {
+    const { user, orderId } = await this.identify(context);
+    if (!user) {
       this.refuse(context, new UnauthorizedException('unauthenticated'));
     }
     if (!/^\d+$/.test(orderId)) {
@@ -40,24 +35,28 @@ export class OrderOwnerGuard implements CanActivate {
     if (!order) {
       this.refuse(context, new NotFoundException(`Order ${orderId} not found`));
     }
-    if (order.userId !== userId) {
+    if (user.role !== 'admin' && order.userId !== user.id) {
       this.refuse(context, new ForbiddenException('forbidden'));
     }
     return true;
   }
 
-  private identify(context: ExecutionContext): Principal {
+  private async identify(
+    context: ExecutionContext,
+  ): Promise<{ user: Principal | null; orderId: string }> {
     if (context.getType() === 'ws') {
       const client = context.switchToWs().getClient<Socket>();
       const body = context.switchToWs().getData<{ orderId?: unknown }>();
-      return {
-        userId: normalize(client.handshake.auth?.userId),
-        orderId: String(body?.orderId ?? ''),
-      };
+      const token = client.handshake.auth?.token;
+      let user: Principal | null = null;
+      if (typeof token === 'string') {
+        user = await this.auth.authenticate(token).catch(() => null);
+      }
+      return { user, orderId: String(body?.orderId ?? '') };
     }
-    const request = context.switchToHttp().getRequest<Request>();
+    const request = context.switchToHttp().getRequest<AuthenticatedRequest>();
     return {
-      userId: normalize(request.header(USER_ID_HEADER)),
+      user: request.user ?? null,
       orderId: String(request.params.id ?? ''),
     };
   }
@@ -68,10 +67,4 @@ export class OrderOwnerGuard implements CanActivate {
     }
     throw error;
   }
-}
-
-function normalize(value: unknown): string | null {
-  if (value === undefined || value === null) return null;
-  const text = String(value).trim();
-  return /^\d+$/.test(text) ? text : null;
 }

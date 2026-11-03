@@ -12,7 +12,8 @@
 `express-openapi-validator` (запити й відповіді звіряються зі спекою, помилки віддаються як
 `application/problem+json`). Події домену йдуть у RabbitMQ через transactional outbox (ДЗ #19 і #22, розділи
 «Async-події через RabbitMQ» та «Outbox та ідемпотентність»); Redis дає кеш, сесії, ліміти і чергу BullMQ
-(ДЗ #23, розділ «Redis: кеш, сесії, ліміти, черга»).
+(ДЗ #23, розділ «Redis: кеш, сесії, ліміти, черга»); доступ закритий ES256-токенами з ротацією refresh і
+RBAC (ДЗ #24, розділ «Auth»).
 
 ## Вимоги
 
@@ -23,13 +24,15 @@ Node.js ≥ 22.12.0, Docker з Compose (для Postgres, RabbitMQ, двох Redi
 ```bash
 npm install
 cp .env.example .env
+node scripts/jwt-keys.mjs >> .env
 cp secrets/db_password.example secrets/db_password
 npm run db:up
 npm run build && npm run migrate && npm run events:topology && npm run seed
 npm start
 ```
 
-Сервер слухає `http://localhost:3000`; relay outbox-у працює всередині нього (`npm run relay` — той самий relay
+Сервер слухає `http://localhost:3000` (`npm start` — голий запуск, значення з `.env`; `npm run start:vault` —
+той самий запуск через обгортку сховища); relay outbox-у працює всередині нього (`npm run relay` — той самий relay
 окремим процесом, для демо). Споживач подій `order.placed` — окремий процес, у другому терміналі (він же
 оголошує топологію брокера при старті, тож `events:topology` потрібен лише щоб API стартував раніше за
 споживача):
@@ -68,6 +71,10 @@ PORT=8080 npm start
 | `REDIS_QUEUE_URL` | так | — | Redis під стан (`noeviction` + AOF), напр. `redis://localhost:6382`; черга BullMQ, сесії, лічильники ліміту | сховище: те саме |
 | `RATE_LIMIT` | ні | `100` | скільки запитів клієнта пропускає ковзне вікно | `.env` (dev) / env оточення (prod) |
 | `RATE_LIMIT_WINDOW_MS` | ні | `10000` | довжина ковзного вікна ліміту, мс | `.env` (dev) / env оточення (prod) |
+| `JWT_KID` | так | — | `kid` ключа підпису access-токенів (ДЗ #24) | сховище: локальний `.env` поза git (dev), env оточення платформи (prod) |
+| `JWT_PRIVATE_KEY` | так | — | base64 від PEM PKCS#8 приватного ключа ES256 | сховище: те саме; дев-пару генерує `node scripts/jwt-keys.mjs >> .env` |
+| `JWT_PUBLIC_KEY` | так | — | base64 від PEM SPKI публічного ключа | сховище: те саме |
+| `REFRESH_TOKEN_PEPPER` | так | — | HMAC-«перець» для хешів refresh-токенів, ≥ 16 байт | сховище: те саме |
 | `PACT_BROKER_URL` | ні | — | адреса Pact Broker для контрактних тестів (`http://127.0.0.1:9292` для compose); застосунок її не використовує, читає лише тестовий код | сховище: локальний `.env` поза git (dev), secrets GitHub (CI) |
 | `PACT_BROKER_TOKEN` | ні | — | bearer-токен брокера; для локального compose-брокера порожній | сховище: локальний `.env` поза git (dev), secrets GitHub (CI) |
 
@@ -157,7 +164,8 @@ docker build -t myapp . && docker run --rm myapp ls -a /app && docker run --rm m
 | --- | --- |
 | `/products` | `GET /products` (cursor-пагінація), `POST /products` (Idempotency-Key), `GET /products/{id}` |
 | `/orders` | `GET /orders` (cursor-пагінація), `POST /orders` (Idempotency-Key), `GET /orders/{id}`, `PATCH /orders/{id}/status` (життєвий цикл), `GET /orders/{id}/events` (SSE) |
-| `/sessions` | `POST /sessions` (сесія в Redis), `GET /sessions/me` (`X-Session-Id`, читання подовжує TTL) — ДЗ #23 |
+| `/sessions` | `POST /sessions` (сесія в Redis для `sub` токена), `GET /sessions/me` (`X-Session-Id`, читання подовжує TTL) — ДЗ #23 |
+| `/auth` | `POST /auth/login`, `POST /auth/refresh` (ротація з детекцією повтору), `POST /auth/logout` — ДЗ #24; усі операції, крім `/health`, `GET /products*` і `login`/`refresh`, під `bearerAuth` |
 
 - **Cursor-пагінація**: `?limit=&cursor=`, відповідь `{ items, next_cursor }`, `next_cursor: null` — сторінок більше немає. Курсор — непрозорий токен.
 - **Idempotency-Key**: обовʼязковий header на обох POST. Той самий ключ + те саме тіло → та сама відповідь `201` + `Idempotency-Replay: true`; той самий ключ + інше тіло → `422`. Ключі живуть у таблиці `idempotency_keys` в одній транзакції з ресурсом (ДЗ #22).
@@ -602,13 +610,14 @@ cp secrets/db_password.example secrets/db_password
 ## Тестування
 
 Драбинка довіри: integration проти справжнього Postgres → E2E повного застосунку → контракт Pact →
-брокер і `can-i-deploy`. Потрібен лише запущений Docker: Postgres, RabbitMQ і Redis для тестів піднімає testcontainers,
+брокер і `can-i-deploy`. Потрібен лише запущений Docker: Postgres, RabbitMQ і Redis для тестів піднімає testcontainers, ES256-пару
+для токенів генерує глобальний setup,
 compose для перших чотирьох команд не потрібен.
 
 | Команда | Що запускає | Результат прогону |
 | --- | --- | --- |
 | `npm run test:integration` | `test/integration/` — репозиторії, checkout, воркер, outbox і relay, споживач `order.placed`, кеш/сесії/ліміт/черга проти Postgres, RabbitMQ і Redis у testcontainers | 7 наборів, 33 тести |
-| `npm run test:e2e` | `test/e2e/` — повний `AppModule` через supertest: замовлення, ключ ідемпотентності, realtime, relay `order.placed`, картка з кешу, сесії, `429` | 14 тестів |
+| `npm run test:e2e` | `test/e2e/` — повний `AppModule` через supertest: замовлення, ключ ідемпотентності, realtime, relay `order.placed`, картка з кешу, сесії, `429`, auth (логін, логаут, детекція повтору, `401` ≠ `403`) | 19 тестів |
 | `npm run test:contract` | `test/contract/consumer.pact-spec.ts` — consumer-тест, пише `pacts/*.json` | 3 interactions |
 | `npm run verify:provider` | `test/contract/provider.pact-spec.ts` — справжній застосунок проти контракту | 3 × `has a matching body (OK)` |
 
@@ -659,6 +668,7 @@ compose для перших чотирьох команд не потрібен.
 | `outbox.int-spec.ts` | замовлення і рядок outbox одним COMMIT; падіння після вставки в outbox відкочує обидва; ключ ідемпотентності: replay, `422` на інше тіло, пʼять паралельних запитів з одним ключем → одне замовлення, невдалий запит ключа не лишає; relay публікує по порядку і позначає `published_at`; publish, що падає завжди → backoff, після пʼяти спроб подія в DLQ і `failed_at`; падіння relay між publish і UPDATE → подія вдруге, ефект один, inbox з однією позначкою (ДЗ #22) |
 | `redis.int-spec.ts` | 30 одночасних промахів → один виклик loader-а, TTL із джитером, лок не знімає чужий токен; сесія подовжує TTL на читанні; ліміт спільний для двох екземплярів і точний під 50 паралельними запитами; черга дедуплікує за `jobId` і доводить падучу задачу до `completed` за три спроби (ДЗ #23) |
 | `test/e2e/redis.e2e-spec.ts` | картка товару з кешу з TTL 295–360 с, інвалідація після замовлення; `POST /sessions` → `GET /sessions/me` і будь-який запит із `X-Session-Id` подовжують TTL, `401` на невідомий id; `429` problem+json із `Retry-After` після ліміту, інший клієнт не зачеплений (ДЗ #23) |
+| `test/e2e/auth.e2e-spec.ts` | логін ES256 (`kid`, `alg`), `401` на пароль/без токена/зіпсований; логаут як дві дії (`access_denylist` + сімʼя); повторне використання refresh валить сімʼю разом із чесним клієнтом; `401` ≠ `403` на власності, ролі, чужому `user_id`/`seller_id` і підробленому payload; список замовлень лише своїх, адмін бачить усі (ДЗ #24) |
 | `test/e2e/orders.e2e-spec.ts` | створити товар → оформити замовлення → прочитати обидва → повтор з тим самим `Idempotency-Key`; `400` без ключа, `404` на невідоме замовлення, `409` при нестачі товару, `422` на той самий ключ з іншим тілом; relay усередині API виносить `order.placed` рівно один раз, повтор за ключем — не публікує (ДЗ #19, #22) |
 | `test/e2e/realtime.e2e-spec.ts` | життєвий цикл статусів і `409`; SSE: `Last-Event-ID`, `400`/`403`/`404` для не-власника, нумерація після рестарту; WS: кімнати, `forbidden`/`unauthenticated` (ДЗ #18) |
 
@@ -735,8 +745,9 @@ curl -s "$PACT_BROKER_URL/can-i-deploy?pacticipant=marketplace-web&version=$VERS
 
 ### CI
 
-`.github/workflows/ci.yml`: job `db` — compose-стенд (Postgres, PgBouncer, RabbitMQ, два Redis), міграції, демо
-ДЗ #14, #19, #22 і #23, бекап і drill; job `tests` — `test:integration` і `test:e2e`; job `contract` — pipeline контракту,
+`.github/workflows/ci.yml`: job `db` — compose-стенд (Postgres, PgBouncer, RabbitMQ, два Redis), одноразова
+ES256-пара для прогону (`scripts/jwt-keys.mjs` → `$GITHUB_ENV`; справжній ключ — у сховищі), міграції, демо
+ДЗ #14, #19, #22, #23 і #24, бекап і drill; job `tests` — `test:integration` і `test:e2e`; job `contract` — pipeline контракту,
 де кожен тег ставить крок деплою, а не крок перевірки:
 
 1. `test:contract` → публікація контракту (`scripts/pact-broker.sh publish`);
@@ -755,7 +766,7 @@ bootstrap, провайдер деплоїться першим; змістов�
 гейт провайдера на кожному PR — з консюмерами у prod. Перевірено локально на тій самій послідовності:
 гейт консюмера до деплою провайдера — `unknown`, після — `true`; контракт, який провайдер порушує, валить
 `verify:provider`, а його гейт лишається `null`. Паролі дев-бази і брокера в job `db` теж беруться зі secrets
-(`DB_PASSWORD`, `BROKER_PASSWORD`; за замовчуванням — дев-значення стенда). Workflow локально не запускався.
+(`DB_PASSWORD`, `BROKER_PASSWORD`, `REFRESH_TOKEN_PEPPER`; за замовчуванням — дев-значення стенда). Workflow локально не запускався.
 
 ## Realtime: статус замовлення без перезавантаження
 
@@ -772,12 +783,12 @@ bootstrap, провайдер деплоїться першим; змістов�
 `Subject`, і з нього її забирають два транспорти:
 
 - **WebSocket** (`src/orders/orders.gateway.ts`, socket.io на тому самому порту): клієнт підключається з
-  `auth: { userId }` і шле `join` з `{ orderId }`. Сервер кладе сокет у кімнату `orders:<id>` і відповідає
+  `auth: { token }` (access-токен ДЗ #24) і шле `join` з `{ orderId }`. Сервер кладе сокет у кімнату `orders:<id>` і відповідає
   ack `{ ok: true, room }` лише якщо замовлення належить цьому користувачу; анонімному або чужому guard
   відмовляє — клієнт отримує подію `exception` з `{ ok: false, error: 'unauthenticated' | 'forbidden' }`
   (так Nest доставляє відмову guard-а в socket.io), ack не приходить. Подія `order.status` емітиться через
   `server.to('orders:<id>')`, тобто тільки в кімнату цього замовлення.
-- **SSE** — `GET /orders/{id}/events` із заголовком `X-User-Id` власника, `content-type:
+- **SSE** — `GET /orders/{id}/events` із bearer-токеном власника, `content-type:
   text/event-stream`. Потік починається з `retry: 1000`, кожна подія — блок `event: order.status`,
   `id: <seq>`, `data: <OrderStatusEvent JSON>`; раз на 15 секунд іде коментар `: ping`. Нове підключення
   без `Last-Event-ID` отримує всі збережені події замовлення, реконект із `Last-Event-ID: N` — лише події
@@ -786,13 +797,12 @@ bootstrap, провайдер деплоїться першим; змістов�
   відсікаються за номером.
 
 Перевірка власника для обох транспортів — один `OrderOwnerGuard` (`src/orders/order-owner.guard.ts`,
-`@UseGuards` і на `join`, і на SSE-маршруті): він бере id користувача з `handshake.auth.userId` або з
-заголовка `X-User-Id`, id замовлення — з тіла `join` або з шляху, і порівнює з `orders.user_id`. Поки в API
-немає автентифікації (вона з'явиться на Лекції 24), користувач називає себе сам — так само, як `user_id` у
-тілі `POST /orders`; після появи сесії guard братиме id з неї, а не з заголовка. Без `X-User-Id` SSE-запит
-відхиляє валідатор спеки (`400`, заголовок обовʼязковий у `openapi.yaml`), чужому — `403`, невідоме
-замовлення — `404`, усе до відкриття потоку. `GET /orders/{id}` і решта REST-читань лишаються відкритими,
-як у контракті ДЗ #9, — це свідомо відкладено до справжньої автентифікації.
+`@UseGuards` і на `join`, і на SSE-маршруті): identity він бере з access-токена ДЗ #24 — для WS з
+`handshake.auth.token`, для SSE з `Authorization: Bearer` (його вже перевірив глобальний `AuthGuard`), id
+замовлення — з тіла `join` або з шляху, і порівнює з `orders.user_id` (адмін проходить). Без токена —
+`401` (WS: `exception` з `unauthenticated`), чужому — `403`, невідоме замовлення — `404`, усе до відкриття
+потоку. До ДЗ #24 тут був заголовок `X-User-Id`, яким користувач називав себе сам; тепер і SSE, і REST-читання
+замовлень доступні лише власнику або адміну.
 
 Запуск і перевірка (застосунок на `http://localhost:3000`; перші два рядки — локальне сховище з ДЗ #11,
 пропустіть їх, якщо `.env` і `secrets/db_password` уже є):
@@ -803,30 +813,35 @@ cp secrets/db_password.example secrets/db_password
 npm ci && npm run db:up && npm run build && npm run migrate && npm run events:topology && npm run seed && npm start
 ```
 
-У другому терміналі створіть замовлення й змінюйте статус:
+У другому терміналі залогіньтесь seed-користувачем 1 (він `admin`, тож може і замовляти, і міняти статус;
+пароль seed-користувачів — `password`), створіть замовлення й змінюйте статус:
 
 ```bash
-curl -s -X POST localhost:3000/orders -H 'Content-Type: application/json' -H "Idempotency-Key: order-$(date +%s)" -d '{"user_id":1,"items":[{"product_id":2,"quantity":1}]}'
+export TOKEN=$(curl -s -X POST localhost:3000/auth/login -H 'Content-Type: application/json' -d '{"email":"seed.user1@example.com","password":"password"}' | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).access_token))')
 ```
 
 ```bash
-for s in processing shipped out_for_delivery delivered; do curl -s -X PATCH localhost:3000/orders/<id>/status -H 'Content-Type: application/json' -d "{\"status\":\"$s\"}"; echo; done
+curl -s -X POST localhost:3000/orders -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -H "Idempotency-Key: order-$(date +%s)" -d '{"user_id":1,"items":[{"product_id":2,"quantity":1}]}'
+```
+
+```bash
+for s in processing shipped out_for_delivery delivered; do curl -s -X PATCH localhost:3000/orders/<id>/status -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d "{\"status\":\"$s\"}"; echo; done
 ```
 
 SSE-заголовок, формат подій і відновлення після `Last-Event-ID: 3` (чотири зміни вище дають події 1..4,
-тож перший `id:` у відповіді — `4`). `X-User-Id: 1` — власник замовлення, створеного командою вище; без
-цього заголовка відповідь — `400` problem+json, із чужим id — `403`:
+тож перший `id:` у відповіді — `4`). Токен — власника замовлення, створеного командою вище; без токена
+відповідь — `401` problem+json, із чужим — `403`:
 
 ```bash
-curl -sN --max-time 2 -H 'X-User-Id: 1' -D - -o /dev/null localhost:3000/orders/<id>/events | grep -i '^content-type'
+curl -sN --max-time 2 -H "Authorization: Bearer $TOKEN" -D - -o /dev/null localhost:3000/orders/<id>/events | grep -i '^content-type'
 ```
 
 ```bash
-curl -sN --max-time 5 -H 'X-User-Id: 1' localhost:3000/orders/<id>/events
+curl -sN --max-time 5 -H "Authorization: Bearer $TOKEN" localhost:3000/orders/<id>/events
 ```
 
 ```bash
-curl -sN --max-time 2 -H 'X-User-Id: 1' -H 'Last-Event-ID: 3' localhost:3000/orders/<id>/events | grep '^id:' | head -1
+curl -sN --max-time 2 -H "Authorization: Bearer $TOKEN" -H 'Last-Event-ID: 3' localhost:3000/orders/<id>/events | grep '^id:' | head -1
 ```
 
 Headless-демо ізоляції кімнат — `scripts/realtime-demo.mjs` (`socket.io-client`). Скрипт сам створює два
@@ -1281,7 +1296,8 @@ problem+json. Цей же механізм у ДЗ #24 зустрінеться 
 протікає саме під навантаженням — тут атомарність є вимогою коректності, а не оптимізацією. Чому ковзне: воно
 не дозволяє сплеску на межі вікон (фіксоване пропускає до 2× ліміту за кілька мілісекунд), а token bucket
 сплеск дозволяє свідомо — для публічного API замовлень сплеск нам не потрібен. Лічильник живе в
-`redis-queue`, тому два поди ділять один ліміт; клієнт — `X-User-Id`, інакше IP. `RateLimitGuard`
+`redis-queue`, тому два поди ділять один ліміт; клієнт — заголовок `X-User-Id` (так демо ділить ліміт між
+подами без логіну), інакше IP. `RateLimitGuard`
 (`src/redis/rate-limit.guard.ts`, глобальний, окрім `/health`) віддає `429` problem+json із `Retry-After` у
 секундах до звільнення найстаршого слота і заголовки `RateLimit-Limit`/`RateLimit-Remaining`; ліміт — `RATE_LIMIT`
 за `RATE_LIMIT_WINDOW_MS` (дефолт 100 за 10 с). Якщо Redis недоступний, guard пропускає запит і пише в лог:
@@ -1377,7 +1393,174 @@ scheduled-runs=4
   саме лок.
 - Витіснення конкретного ключа не демонструється: LRU у Redis наближений (`maxmemory-samples 5`), жертва
   обирається з вибірки; `cache-lru`/`cache-maxmemory` читаються з `CONFIG GET` у рантаймі.
-- Сесія поки не замінює `X-User-Id` у guard-і власника (ДЗ #18) — це зробить auth у ДЗ #24.
+- Сесія не замінює токен у guard-і власника (ДЗ #18): з ДЗ #24 там access-токен, а `POST /sessions` сам
+  вимагає bearer і створює сесію для його `sub`.
+
+
+## Auth
+
+`POST /orders` більше не може зробити будь-хто від чийого завгодно імені. Дві різні задачі розведені жорстко:
+**автентифікація** («хто це?») — факт, який перевіряється криптографією: підпис ES256 на access-токені;
+**авторизація** («чи можна йому це?») — рішення з даних, яких у токені немає: власник замовлення, роль продавця.
+Перша дає `401`, друга — `403`, і це не стилістика: клієнтський SDK на `401` іде рефрешити токен, а на `403`
+показує помилку.
+
+### Змінні зі сховища
+
+| Змінна | Джерело | Навіщо | Формат |
+| --- | --- | --- | --- |
+| `JWT_PRIVATE_KEY` | сховище (#11) | підпис access-токенів | base64 від PEM PKCS#8, EC P-256 |
+| `JWT_PUBLIC_KEY` | сховище (#11) | перевірка підпису | base64 від PEM SPKI |
+| `JWT_KID` | сховище (#11) | `kid` у заголовку токена: яким ключем підписано | рядок, напр. `dev`, `2026-11` |
+| `REFRESH_TOKEN_PEPPER` | сховище (#11) | HMAC-«перець» для хешів refresh-токенів | випадковий рядок ≥ 16 байт |
+
+Дефолтів у схемі (`src/config/env.schema.ts`) немає — дефолт тут дорівнював би зашитому в код ключу. Схема
+виконується першою дією процесу, до пулу Postgres, тому голий `npm run start` без ключа падає з exit ≠ 0 і
+називає змінну, якої бракує; `npm run start:vault` і три демо йдуть через `scripts/with-secrets.sh dev`.
+Дев-пару генерує `node scripts/jwt-keys.mjs >> .env` (у git її нема, `.env` ігнорується); ціна витоку
+`DB_URL` — доступ до бази з мережі, ціна витоку ключа підпису — токен будь-кого без жодного доступу.
+
+Відбитки публічних ключів (SHA-256 від SPKI DER, перші 16 байт), як доказ, що оточення різні:
+
+| Оточення | `kid` | Відбиток |
+| --- | --- | --- |
+| dev (локальний `.env`) | `dev` | `8cb7:7580:6988:16c8:eacd:ce00:976b:739b` |
+| prod (сховище, env `prod`) | `prod-2026-11` | `4375:aa4d:99bd:6bb2:8ffd:f029:3d1a:93b7` |
+
+Відбиток поточного ключа застосунок пише в лог на старті (`signing key kid=… fingerprint=…`) — це все, що
+про ключ взагалі може зʼявитись у логах: токени, їхні хвости й хеші в лог не пишуться, лише `jti`,
+`family_id` і відбиток.
+
+### Токени
+
+`POST /auth/login {email, password}` (паролі — scrypt із сіллю, `src/auth/password.ts`) → пара:
+
+- **access** — JWT ES256 на 10 хвилин (`src/auth/jwt.ts`, `jose`): `sub`, `role`, `fid` (сімʼя
+  refresh-токенів), `jti`, `iss`/`aud`, заголовок `alg: ES256, kid`. Обрано ES256, а не RS256: OWASP позначає
+  RS256 «Not recommended», ES256 дає підпис 64 байти при тій самій стійкості, а ключ P-256 — 32 байти проти
+  2048 біт RSA. Верифікація — `jwtVerify(token, key, { algorithms: ['ES256'], issuer, audience })`: явний
+  allowlist алгоритмів (RFC 8725 §3.1) — єдиний надійний запобіжник від algorithm confusion; ключ береться з
+  keyring за `kid`, невідомий `kid` — `401`.
+- **refresh** — 32 випадкових байти, непрозорий (не JWT), 30 днів. У базі лежить не він, а
+  `token_hash = HMAC-SHA256(pepper, token)`: дамп таблиці `refresh_tokens` без «перцю» зі сховища — не дамп
+  чинних сесій.
+
+Міграція `Auth` (не `synchronize`): `users.role` (`buyer` / `seller` / `admin`, CHECK) і `users.password_hash`;
+`refresh_tokens (id, user_id, family_id, token_hash UNIQUE, created_at, expires_at, used_at, revoked_at)` з
+індексами по `token_hash` і `family_id`; `access_denylist (jti, expires_at)`.
+
+### Ротація з детекцією повтору
+
+`POST /auth/refresh` в одній транзакції: `SELECT … FOR UPDATE` за хешем → якщо `used_at` уже стоїть, це
+повтор: `UPDATE refresh_tokens SET revoked_at = now() WHERE family_id = …` на **всю сімʼю** і рядок у лог
+`refresh token reuse detected: family=… user=…`; відкликання комітиться, і лише потім клієнт отримує `401`
+(відкотити транзакцію разом із `401` — найлегший спосіб втратити саме відкликання, цей дефект спіймало демо).
+Інакше — `used_at = now()`, нова пара в тій самій сімʼї, COMMIT. Ротація без сімʼї (RFC 9700 §4.14.2 вимагає
+або sender-constrained токен, або ротацію з детекцією) нічого не дає: злодій рефрешиться першим, чесний клієнт
+отримує `401` і мовчки перелогінюється, а сесія злодія живе далі. Звʼязок старого й нового токена через
+`family_id` існує рівно для того, щоб виявлений повтор було чим відкликати — `demo:reuse` показує, що після
+сигналу вилітає і чесний клієнт.
+
+Гонка на клієнті (два паралельні рефреші одним токеном) тут виглядатиме як компрометація. Обрано: вікна
+благодаті немає, рефреш серіалізується на клієнті (один проміс на всіх запитах) — так простіше і сервер не
+мусить памʼятати «ту саму нову пару» для повторного предʼявлення.
+
+### Чому логаут — це дві дії
+
+Refresh-токен — рядок у базі: `revoked_at` на сімʼю, і він мертвий. Access self-contained: підпис валідний
+до `exp`, і без денилиста логаут його не зачепить — тому `POST /auth/logout` у тій самій транзакції кладе
+`jti` у `access_denylist` з `expires_at = exp` токена (TTL = залишок життя, не більше: `npm run prune`
+прибирає протухлі рядки). Денилист — у Postgres, а не в Redis з ДЗ #23, свідомо: відкликання сімʼї та позначка
+`jti` мусять бути одним COMMIT, інакше це той самий dual write, від якого тікали в ДЗ #22; ціна — один
+індексний запит на кожен автентифікований виклик (`SELECT … FROM access_denylist WHERE jti = $1 UNION ALL
+SELECT … FROM refresh_tokens WHERE family_id = $2 AND revoked_at IS NOT NULL LIMIT 1`), і він же гасить
+access-токени сімʼї, вбитої детекцією повтору. Це і є рахунок за «JWT не можна відкликати»: короткий TTL
+платить частими рефрешами, денилист — тим, що верифікація перестала бути stateless (RFC 7009 §3).
+
+### 401 ≠ 403 і RBAC на двох рівнях
+
+`AuthGuard` (`src/auth/auth.guard.ts`, глобальний, `@Public()` на `/health`, `GET /products*`, `/auth/login`,
+`/auth/refresh`) читає `Authorization: Bearer`, перевіряє підпис, денилист і сімʼю → `401` з причиною
+(`missing bearer token`, `invalid token`, `token revoked`), кладе principal у запит; `@Roles(…)` там само дає
+`403`, якщо роль не з переліку.
+
+- **Рівень ролі**: `POST /products` — тільки `seller`/`admin` (`403` покупцю); `PATCH /orders/{id}/status` —
+  тільки `admin`.
+- **Рівень власності** — свідомо не в guard-і: guard стоїть до завантаження ресурсу і не знає `owner_id`, тож
+  довелося б ходити в базу двічі. Межа проходить у сервісі: `GET /orders/{id}` — замовлення завантажено, і
+  якщо `order.user_id ≠ sub` і роль не `admin` → `403` (`OrdersService.findOne`); `GET /orders` — `WHERE user_id
+  = sub` прямо в запиті, адмін бачить усе; `POST /orders` — `user_id` тіла має збігатися з `sub`; `POST /products`
+  — `seller_id` тіла має бути своїм. SSE `GET /orders/{id}/events` і WS `join` беруть identity з того ж
+  bearer-токена (`handshake.auth.token`) і перевіряють власника в `OrderOwnerGuard` — там ресурс і так треба
+  завантажити, щоб відповісти `404`.
+
+Роль у токені — кеш, не джерело правди: розжалуваний адмін лишається адміном до `exp` свого access-токена
+(до 10 хвилин). Це свідомий компроміс; якщо потрібно негайно — логаут його сімʼї (`revoked_at` + денилист)
+діє одразу.
+
+### Ротація ключа підпису без простою
+
+Заголовок `kid` і keyring у `AccessTokens`: новий ключ спершу додається у keyring **лише для верифікації**
+(обидва `kid` валідні), потім підпис перемикається на новий `kid`, і лише коли минув `ACCESS_TTL_S` від
+перемикання — старий `kid` прибирається. У цьому вікні overlap жоден виданий токен не стає `401` без причини.
+Токен із невідомим `kid` відкидається одразу — це і захист від підміни ключа, і сигнал, що ротація пройшла
+неправильно.
+
+### Демо
+
+Кожне демо саме піднімає застосунок у своєму процесі (`src/redis/demo-api.ts`, порт `0`, закривається в
+кінці), створює свіжих користувачів із випадковими паролями, друкує HTTP-статуси й перевіряє їх як інваріант.
+`tampered` форжиться без ключа: payload токена з `role: admin` при старому підписі — рішення на
+`jwt.decode()` віддало б тут `200`.
+
+```
+npm run demo:auth
+login=200
+no-token=401
+with-token=200
+refresh=200
+rotated-access=200
+logout=204
+after-logout=401
+old-access-after-logout=401
+refresh-after-logout=401
+relogin=200
+```
+
+```
+npm run demo:reuse
+login=200
+r1-refresh=200
+r1-reuse=401
+r2-after-reuse=401
+access-after-reuse=401
+family-tokens=2
+family-revoked=2
+```
+
+```
+npm run demo:rbac
+anon=401
+own=200
+foreign=403
+role-denied=403
+role-allowed=201
+seller-foreign=403
+tampered=401
+```
+
+Той самий сценарій живе e2e-тестами (`test/e2e/auth.e2e-spec.ts`): логін і `401`, логаут як дві дії,
+детекція повтору з перевіркою `revoked_at` у всій сімʼї, `401` проти `403` на власності, ролі й підробленому
+підписі, список замовлень лише своїх. Pact-верифікація провайдера (ДЗ #16) підкладає admin-токен через
+`requestFilter` — контракт консюмера про автентифікацію не знає, і це нормально: він описує ресурси.
+
+### Що лишилось за межами
+
+- Сесії ДЗ #23 і JWT живуть поруч: `POST /sessions` тепер під bearer-токеном і створює сесію для його `sub`;
+  власний IdP/OIDC — Лекція 25.
+- Паролі seed-користувачів — `password` (дев-значення, не секрет): `seed.user1@example.com` — `admin`,
+  `seed.user2`/`seed.user3` — `seller`, решта — `buyer`.
+- ReBAC-кортежі (бонус) не робилися.
 
 
 ## Grading
@@ -1389,6 +1572,18 @@ export BROKER_URL=amqp://marketplace:marketplace_dev@127.0.0.1:5672
 export REDIS_URL=redis://127.0.0.1:6379
 export REDIS_QUEUE_URL=redis://127.0.0.1:6382
 export SKIP_VAULT=1
+# одноразова пара ES256 для прогону; PEM їде в base64, щоб багаторядковість не поїхала
+node -e 'const {generateKeyPairSync}=require("node:crypto");
+const k=generateKeyPairSync("ec",{namedCurve:"P-256",
+  privateKeyEncoding:{type:"pkcs8",format:"pem"},
+  publicKeyEncoding:{type:"spki",format:"pem"}});
+const fs=require("node:fs");
+fs.writeFileSync("/tmp/priv.b64",Buffer.from(k.privateKey).toString("base64"));
+fs.writeFileSync("/tmp/pub.b64",Buffer.from(k.publicKey).toString("base64"));'
+export JWT_KID=grader
+export JWT_PRIVATE_KEY="$(cat /tmp/priv.b64)"
+export JWT_PUBLIC_KEY="$(cat /tmp/pub.b64)"
+export REFRESH_TOKEN_PEPPER=grader-pepper-0123456789abcdef
 npm ci && npm run build && npm run migrate && npm run events:topology
 bash scripts/with-secrets.sh dev bash scripts/backup.sh
 bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
@@ -1419,9 +1614,9 @@ bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
 послідовність гейта з брокером — у «Тестування → Брокер локально і гейт can-i-deploy».
 
 ДЗ #18 (застосунок піднятий за інструкцією з «Realtime», `localhost:3000`): команди з `curl` для SSE,
-`Last-Event-ID` і два прогони `node scripts/realtime-demo.mjs` / `--same-room` — у тому ж розділі. SSE-потік
-віддається лише власнику: у `curl` потрібен `-H 'X-User-Id: <user_id замовлення>'` (для замовлення з
-прикладу — `1`), без нього — `400`.
+`Last-Event-ID` і два прогони `node scripts/realtime-demo.mjs` / `--same-room` — у тому ж розділі. З ДЗ #24
+SSE-потік і REST-читання замовлень доступні лише з bearer-токеном власника (`401` без токена, `403` чужому);
+скрипт демо логіниться seed-користувачами сам.
 
 ДЗ #19 (після `npm run build && npm run migrate` з блоку вище; `seed` не потрібен — демо створюють свої дані):
 `npm run demo:publish`, `npm run demo:dlq`, `npm run demo:duplicate`. `BROKER_URL` — AMQP-адреса RabbitMQ зі
@@ -1443,6 +1638,11 @@ URL) не потребують ні стенда, ні сховища.
 демо, тому їм потрібні і `BROKER_URL`, і `DB_*` з блоку вище; `demo:queue` відмовиться стартувати, якщо
 паралельно запущений `npm run worker`. Топологію брокера демо оголошують самі, `events:topology` у блоці вище
 потрібен лише для `npm start`.
+
+ДЗ #24 (ті самі `export`): `npm run demo:auth`, `npm run demo:reuse`, `npm run demo:rbac`. Ключ підпису
+грейдеру не потрібен — застосунку байдуже, чия пара, аби валідна, тому блок генерує одноразову ES256-пару на
+місці; `REFRESH_TOKEN_PEPPER` — будь-який рядок від 16 байт. Голий `npm run start` без цих змінних падає з
+exit 1 і називає їх (критерій 3), `npm run start:vault` бере їх зі сховища.
 
 ## Перевірки
 

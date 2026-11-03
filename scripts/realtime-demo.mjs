@@ -5,6 +5,7 @@ const base = process.env.API_URL ?? 'http://localhost:3000';
 const sameRoom = process.argv.includes('--same-room');
 const buyerA = Number(process.env.USER_A ?? 1);
 const buyerB = Number(process.env.USER_B ?? 2);
+const password = process.env.SEED_PASSWORD ?? 'password';
 const graceMs = 1500;
 
 async function api(method, path, body, headers = {}) {
@@ -22,6 +23,14 @@ async function api(method, path, body, headers = {}) {
   return payload;
 }
 
+async function login(userId) {
+  const { access_token } = await api('POST', '/auth/login', {
+    email: `seed.user${userId}@example.com`,
+    password,
+  });
+  return access_token;
+}
+
 async function productInStock() {
   const page = await api('GET', '/products?limit=100');
   const product = page.items.find((item) => item.stock > 0);
@@ -29,17 +38,20 @@ async function productInStock() {
   return product.id;
 }
 
-async function placeOrder(userId, productId) {
+async function placeOrder(userId, token, productId) {
   return api(
     'POST',
     '/orders',
     { user_id: userId, items: [{ product_id: productId, quantity: 1 }] },
-    { 'Idempotency-Key': randomUUID() },
+    { 'Idempotency-Key': randomUUID(), Authorization: `Bearer ${token}` },
   );
 }
 
-function connect(userId) {
-  return io(base, { auth: { userId }, transports: ['websocket'] });
+function connect(token) {
+  return io(base, {
+    auth: token ? { token } : undefined,
+    transports: ['websocket'],
+  });
 }
 
 function join(client, orderId) {
@@ -61,14 +73,16 @@ function join(client, orderId) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const tokenA = await login(buyerA);
+const tokenB = await login(buyerB);
 const productId = await productInStock();
-const orderA = await placeOrder(buyerA, productId);
-const orderB = await placeOrder(buyerB, productId);
+const orderA = await placeOrder(buyerA, tokenA, productId);
+const orderB = await placeOrder(buyerB, tokenB, productId);
 const roomB = sameRoom ? orderA.id : orderB.id;
-const userB = sameRoom ? buyerA : buyerB;
+const tokenForB = sameRoom ? tokenA : tokenB;
 
-const clientA = connect(buyerA);
-const clientB = connect(userB);
+const clientA = connect(tokenA);
+const clientB = connect(tokenForB);
 const received = { A: [], B: [] };
 clientA.on('order.status', (event) => received.A.push(event));
 clientB.on('order.status', (event) => received.B.push(event));
@@ -84,12 +98,17 @@ if (!sameRoom) {
   const foreign = await join(clientB, orderA.id);
   console.log(`FOREIGN_JOIN=${foreign.ok ? 'allowed' : 'refused'}`);
 }
-const anonymous = io(base, { transports: ['websocket'] });
+const anonymous = connect();
 const anonymousAck = await join(anonymous, orderA.id);
 console.log(`ANONYMOUS_JOIN=${anonymousAck.ok ? 'allowed' : 'refused'}`);
 anonymous.close();
 
-await api('PATCH', `/orders/${orderA.id}/status`, { status: 'processing' });
+await api(
+  'PATCH',
+  `/orders/${orderA.id}/status`,
+  { status: 'processing' },
+  { Authorization: `Bearer ${tokenA}` },
+);
 const deadline = Date.now() + 3000;
 while (received.A.length === 0 && Date.now() < deadline) await sleep(50);
 await sleep(graceMs);

@@ -1,9 +1,11 @@
+import { AccessDenylistEntry } from './access-denylist.entity';
 import { IdempotencyKey } from './idempotency-key.entity';
 import { OrderEvent } from './order-event.entity';
 import { OrderItem } from './order-item.entity';
 import { Order } from './order.entity';
 import { OutboxEvent } from './outbox-event.entity';
 import { ProcessedMessage } from './processed-message.entity';
+import { RefreshToken } from './refresh-token.entity';
 import { Product } from './product.entity';
 import { Shipment } from './shipment.entity';
 import { Task } from './task.entity';
@@ -20,4 +22,6 @@ export const entities = [
   OutboxEvent,
   ProcessedMessage,
   IdempotencyKey,
+  RefreshToken,
+  AccessDenylistEntry,
 ];

@@ -2,7 +2,8 @@ import Redis from 'ioredis';
 import { parseRedisUrls } from './config/env.schema';
 import { DataSource } from 'typeorm';
 import { dataSourceOptions } from './data-source';
-import { finish, newBuyer, sleep, summary } from './events/demo-harness';
+import { login, newAccount } from './auth/demo-accounts';
+import { finish, sleep, summary } from './events/demo-harness';
 import { bootApi } from './redis/demo-api';
 import { SessionStore } from './redis/session.store';
 
@@ -16,7 +17,7 @@ interface SessionBody {
 
 async function main() {
   const dataSource = await new DataSource(dataSourceOptions).initialize();
-  const { buyerId } = await newBuyer(dataSource);
+  const buyer = await newAccount(dataSource, 'buyer');
   await dataSource.destroy();
   const redis = new Redis(parseRedisUrls(process.env).queue);
   const [, policy] = (await redis.config(
@@ -25,6 +26,7 @@ async function main() {
   )) as string[];
 
   let api = await bootApi();
+  const token = (await login(api.url, buyer)).body.access_token as string;
   const seen = new Set<string>();
   let requests = 0;
   const call = async (path: string, init: RequestInit) => {
@@ -37,8 +39,7 @@ async function main() {
 
   const created = await call('/sessions', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ user_id: buyerId }),
+    headers: { authorization: `Bearer ${token}` },
   });
   const sessionId = created.body.session_id;
   const key = SessionStore.key(sessionId);

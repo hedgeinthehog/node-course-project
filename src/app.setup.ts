@@ -15,6 +15,7 @@ export function configureApp(app: NestExpressApplication) {
       apiSpec: join(projectRoot, 'openapi', 'openapi.yaml'),
       validateRequests: true,
       validateResponses: true,
+      validateSecurity: false,
     }),
   );
 }

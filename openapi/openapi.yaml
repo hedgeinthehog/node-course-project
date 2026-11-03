@@ -24,6 +24,10 @@ tags:
     description: Customer orders placed for products.
   - name: health
     description: Service health.
+  - name: sessions
+    description: Server-side sessions kept in Redis with a rolling TTL.
+  - name: auth
+    description: Login, refresh-token rotation with reuse detection, logout.
 
 paths:
   /health:
@@ -107,6 +111,8 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/CreateProduct'
+      security:
+        - bearerAuth: []
       responses:
         '201':
           description: Product created (or replayed for a repeated Idempotency-Key).
@@ -130,6 +136,10 @@ paths:
                 $ref: '#/components/schemas/Problem'
         '422':
           $ref: '#/components/responses/IdempotencyConflict'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         default:
           $ref: '#/components/responses/UnexpectedError'
 
@@ -165,6 +175,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
+      security:
+        - bearerAuth: []
       responses:
         '200':
           description: A page of orders.
@@ -187,6 +199,10 @@ paths:
                     next_cursor: null
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         default:
           $ref: '#/components/responses/UnexpectedError'
     post:
@@ -218,6 +234,8 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/CreateOrder'
+      security:
+        - bearerAuth: []
       responses:
         '201':
           description: Order created (or replayed for a repeated Idempotency-Key).
@@ -254,6 +272,10 @@ paths:
                 $ref: '#/components/schemas/Problem'
         '422':
           $ref: '#/components/responses/IdempotencyConflict'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         default:
           $ref: '#/components/responses/UnexpectedError'
 
@@ -264,6 +286,8 @@ paths:
       tags: [orders]
       operationId: getOrder
       summary: Get an order by id
+      security:
+        - bearerAuth: []
       responses:
         '200':
           description: The order.
@@ -285,6 +309,10 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '404':
           $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         default:
           $ref: '#/components/responses/UnexpectedError'
 
@@ -308,6 +336,8 @@ paths:
             examples:
               ship:
                 value: { status: shipped }
+      security:
+        - bearerAuth: []
       responses:
         '200':
           description: The order with its new status.
@@ -325,6 +355,10 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         default:
           $ref: '#/components/responses/UnexpectedError'
 
@@ -336,23 +370,13 @@ paths:
       operationId: streamOrderEvents
       summary: Server-sent events with status changes of an order
       description: >-
-        Long-lived `text/event-stream`, available only to the owner of the order (`X-User-Id`). The
+        Long-lived `text/event-stream`, available only to the owner of the order (bearer token). The
         stream opens with `retry: 1000`; every status change arrives as `event: order.status` with a
         per-order `id:` that grows by one and an OrderStatusEvent JSON in `data:`; a `: ping` comment
         every 15 seconds keeps idle connections alive. Events are stored in the `order_events` table, so
         the numbering survives restarts and a client that reconnects with `Last-Event-ID` first receives
         the events it missed.
       parameters:
-        - name: X-User-Id
-          in: header
-          required: true
-          description: >-
-            Id of the user reading the stream. Until real authentication exists the client names itself,
-            the same way `user_id` is sent in the order body; the stream is served only when this user
-            owns the order (403 otherwise).
-          schema:
-            type: integer
-            minimum: 1
         - name: Last-Event-ID
           in: header
           required: false
@@ -360,6 +384,8 @@ paths:
           schema:
             type: integer
             minimum: 0
+      security:
+        - bearerAuth: []
       responses:
         '200':
           description: Event stream.
@@ -381,6 +407,8 @@ paths:
                 $ref: '#/components/schemas/Problem'
         '404':
           $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         default:
           $ref: '#/components/responses/UnexpectedError'
 
@@ -390,14 +418,10 @@ paths:
       operationId: createSession
       summary: Start a session for a user
       description: >-
-        Creates a server-side session stored in Redis with a rolling TTL. The id returned here
-        is sent back in the `X-Session-Id` header; every read of the session extends its TTL.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateSession'
+        Creates a server-side session in Redis for the authenticated user, with a rolling TTL. The id
+        returned here is sent back in the `X-Session-Id` header; every request carrying it extends the TTL.
+      security:
+        - bearerAuth: []
       responses:
         '201':
           description: Session created.
@@ -413,12 +437,10 @@ paths:
                     expires_in: 1800
         '400':
           $ref: '#/components/responses/BadRequest'
-        '404':
-          description: The user does not exist.
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         default:
           $ref: '#/components/responses/UnexpectedError'
 
@@ -426,7 +448,7 @@ paths:
     get:
       tags: [sessions]
       operationId: getCurrentSession
-      summary: Read the current session and extend its TTL
+      summary: Read the current session and extend its TTL (the session id is the credential here)
       parameters:
         - name: X-Session-Id
           in: header
@@ -459,7 +481,84 @@ paths:
         default:
           $ref: '#/components/responses/UnexpectedError'
 
+  /auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: Exchange credentials for an access/refresh token pair
+      description: >-
+        The access token is a short-lived ES256 JWT (10 minutes); the refresh token is an opaque random
+        string stored only as an HMAC hash. Every login starts a new refresh-token family.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Credentials'
+      responses:
+        '200':
+          description: Token pair issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      operationId: refreshTokens
+      summary: Rotate the refresh token and issue a new pair
+      description: >-
+        The presented refresh token is marked used and a new pair is issued inside the same family.
+        Presenting an already used token is treated as theft: the whole family is revoked and every
+        access token of that family stops working.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: New token pair; the old refresh token is dead.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: Revoke the refresh-token family and deny the current access token
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: Logged out; the refresh family is revoked and the access token is denied until it expires.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
   parameters:
     Id:
       name: id
@@ -508,6 +607,18 @@ components:
             $ref: '#/components/schemas/Problem'
     IdempotencyConflict:
       description: The Idempotency-Key was already used with a different request body.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Unauthorized:
+      description: Missing, expired, revoked or tampered access token; refresh the session and retry.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Forbidden:
+      description: The token is valid but this user may not perform the operation on this resource.
       content:
         application/problem+json:
           schema:
@@ -619,14 +730,44 @@ components:
           minimum: 0
           description: Units sold across non-cancelled orders; served from the Redis cache (TTL 300-360 s).
 
-    CreateSession:
+    Credentials:
       type: object
       additionalProperties: false
-      required: [user_id]
+      required: [email, password]
       properties:
-        user_id:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 1
+
+    RefreshRequest:
+      type: object
+      additionalProperties: false
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          minLength: 1
+
+    TokenPair:
+      type: object
+      additionalProperties: false
+      required: [access_token, refresh_token, token_type, expires_in]
+      properties:
+        access_token:
+          type: string
+          description: ES256 JWT with `sub`, `role`, `fid` (refresh family), `jti`, `exp`.
+        refresh_token:
+          type: string
+          description: Opaque random string; single use, rotated on every refresh.
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_in:
           type: integer
-          minimum: 1
+          description: Lifetime of the access token in seconds.
 
     Session:
       type: object

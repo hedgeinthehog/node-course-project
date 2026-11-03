@@ -5,6 +5,7 @@ import { DataSource } from 'typeorm';
 import { SessionStore } from '../../src/redis/session.store';
 import { given } from '../integration/testkit/builders';
 import { resetDatabase } from '../integration/testkit/database';
+import { bearer } from './auth-helpers';
 import { createApp } from './create-app';
 
 describe('redis-backed API features (e2e)', () => {
@@ -47,8 +48,10 @@ describe('redis-backed API features (e2e)', () => {
     const stale = await api().get(`/products/${lamp.id}`).expect(200);
     expect(stale.body.stock).toBe(5);
 
+    const asBuyer = await bearer(app, buyer);
     await api()
       .post('/orders')
+      .set(asBuyer)
       .set('Idempotency-Key', 'cache-1')
       .send({
         user_id: Number(buyer.id),
@@ -63,10 +66,8 @@ describe('redis-backed API features (e2e)', () => {
     const { user } = given(dataSource);
     const buyer = await user();
 
-    const created = await api()
-      .post('/sessions')
-      .send({ user_id: Number(buyer.id) })
-      .expect(201);
+    const asBuyer = await bearer(app, buyer);
+    const created = await api().post('/sessions').set(asBuyer).expect(201);
     expect(created.body).toEqual({
       session_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
       user_id: Number(buyer.id),
@@ -94,7 +95,7 @@ describe('redis-backed API features (e2e)', () => {
       .set('X-Session-Id', '00000000-0000-4000-8000-000000000000')
       .expect(401);
     expect(unknown.body).toMatchObject({ status: 401, title: 'Unauthorized' });
-    await api().post('/sessions').send({ user_id: 424242 }).expect(404);
+    await api().post('/sessions').expect(401);
   });
 
   it('answers 429 with Retry-After once a client exceeds the sliding-window limit', async () => {

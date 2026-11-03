@@ -6,6 +6,11 @@ const RETENTION = [
   ['outbox', `failed_at < now() - interval '30 days'`],
   ['idempotency_keys', `created_at < now() - interval '24 hours'`],
   ['processed_messages', `processed_at < now() - interval '30 days'`],
+  [
+    'refresh_tokens',
+    `expires_at < now() OR revoked_at < now() - interval '30 days'`,
+  ],
+  ['access_denylist', `expires_at < now()`],
 ] as const;
 
 async function main() {

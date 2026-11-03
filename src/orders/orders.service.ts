@@ -1,10 +1,12 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, MoreThan, Repository } from 'typeorm';
+import type { Principal } from '../auth/auth.service';
 import { CheckoutError } from '../checkout/checkout';
 import { buildPage, decodeCursor, Page } from '../common/pagination';
 import { OrderItem } from '../entities/order-item.entity';
@@ -27,7 +29,12 @@ export class OrdersService {
     private readonly cache: CacheAside,
   ) {}
 
-  async create(key: string, dto: CreateOrderDto) {
+  async create(key: string, dto: CreateOrderDto, actor: Principal) {
+    if (actor.role !== 'admin' && String(dto.user_id) !== actor.id) {
+      throw new ForbiddenException(
+        `user ${actor.id} cannot place an order for user ${dto.user_id}`,
+      );
+    }
     try {
       const outcome = await placeOrder(this.dataSource, key, dto);
       if (!outcome.replayed) {
@@ -48,9 +55,16 @@ export class OrdersService {
     }
   }
 
-  async findAll(limit: number, cursor?: string): Promise<Page<OrderDto>> {
+  async findAll(
+    limit: number,
+    cursor: string | undefined,
+    actor: Principal,
+  ): Promise<Page<OrderDto>> {
     const rows = await this.orders.find({
-      where: { id: MoreThan(String(decodeCursor(cursor))) },
+      where: {
+        id: MoreThan(String(decodeCursor(cursor))),
+        ...(actor.role !== 'admin' && { userId: actor.id }),
+      },
       order: { id: 'ASC' },
       take: limit + 1,
       relations: { items: true },
@@ -88,13 +102,16 @@ export class OrdersService {
     return toOrderDto(order);
   }
 
-  async findOne(id: string): Promise<OrderDto> {
+  async findOne(id: string, actor: Principal): Promise<OrderDto> {
     const order = await this.orders.findOne({
       where: { id },
       relations: { items: true },
     });
     if (!order) {
       throw new NotFoundException(`Order ${id} not found`);
+    }
+    if (actor.role !== 'admin' && order.userId !== actor.id) {
+      throw new ForbiddenException(`Order ${id} belongs to another user`);
     }
     return toOrderDto(order);
   }

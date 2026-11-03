@@ -1,9 +1,11 @@
 import { execSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { resolve } from 'node:path';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import type * as Pact from '@pact-foundation/pact';
 import { DataSource } from 'typeorm';
+import { AccessTokens } from '../../src/auth/jwt';
 import { seedDatabase } from '../../src/seed-data';
 import { resetDatabase } from '../integration/testkit/database';
 
@@ -56,9 +58,23 @@ describe('marketplace-api provider verification', () => {
           pactUrls: [resolve('pacts', 'marketplace-web-marketplace-api.json')],
         };
 
+    const tokens = AccessTokens.fromBase64(
+      process.env.JWT_PRIVATE_KEY!,
+      process.env.JWT_PUBLIC_KEY!,
+      process.env.JWT_KID!,
+    );
+    const { token } = await tokens.sign(
+      { id: '1', role: 'admin' },
+      randomUUID(),
+    );
+
     await new Verifier({
       provider: 'marketplace-api',
       providerBaseUrl: `http://127.0.0.1:${port}`,
+      requestFilter: (req, _res, next) => {
+        req.headers.authorization = `Bearer ${token}`;
+        next();
+      },
       ...pacts,
       stateHandlers: {
         'order 1 exists': () => seedDatabase(dataSource),

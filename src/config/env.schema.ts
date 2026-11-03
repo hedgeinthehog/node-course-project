@@ -1,7 +1,24 @@
+import { createPrivateKey, createPublicKey } from 'node:crypto';
 import { z } from 'zod';
 
 export const brokerUrlSchema = z.url({ protocol: /^amqps?$/ });
 export const redisUrlSchema = z.url({ protocol: /^rediss?$/ });
+
+const pemBase64 = (parse: (pem: string) => unknown, what: string) =>
+  z
+    .string()
+    .min(1)
+    .refine(
+      (value) => {
+        try {
+          parse(Buffer.from(value, 'base64').toString('utf8'));
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      { message: `must be a base64-encoded PEM ${what}` },
+    );
 
 export const envSchema = z.object({
   NODE_ENV: z
@@ -20,6 +37,10 @@ export const envSchema = z.object({
   REDIS_QUEUE_URL: redisUrlSchema,
   RATE_LIMIT: z.coerce.number().int().min(1).default(100),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1000).default(10_000),
+  JWT_KID: z.string().min(1),
+  JWT_PRIVATE_KEY: pemBase64(createPrivateKey, 'private key'),
+  JWT_PUBLIC_KEY: pemBase64(createPublicKey, 'public key'),
+  REFRESH_TOKEN_PEPPER: z.string().min(16),
   PACT_BROKER_URL: z.string().url().optional(),
   PACT_BROKER_TOKEN: z.string().optional(),
 });

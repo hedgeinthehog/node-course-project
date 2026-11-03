@@ -5,6 +5,7 @@ import request from 'supertest';
 import { DataSource } from 'typeorm';
 import { given } from '../integration/testkit/builders';
 import { resetDatabase } from '../integration/testkit/database';
+import { bearer, tokensFor } from './auth-helpers';
 import { createApp } from './create-app';
 
 type JoinResult = { ok: boolean; room?: string; error?: string };
@@ -15,8 +16,9 @@ describe('order status realtime (e2e)', () => {
   let base: string;
   const api = () => request(app.getHttpServer());
   const sockets: Socket[] = [];
+  let admin: Record<string, string>;
 
-  const connect = (auth?: { userId: number }) => {
+  const connect = (auth?: { token: string }) => {
     const socket = io(base, { auth, transports: ['websocket'] });
     sockets.push(socket);
     return socket;
@@ -62,7 +64,11 @@ describe('order status realtime (e2e)', () => {
   const idsIn = (text: string) =>
     [...text.matchAll(/^id: (\d+)$/gm)].map((match) => Number(match[1]));
   const changeStatus = (orderId: string, status: string) =>
-    api().patch(`/orders/${orderId}/status`).send({ status }).expect(200);
+    api()
+      .patch(`/orders/${orderId}/status`)
+      .set(admin)
+      .send({ status })
+      .expect(200);
 
   beforeAll(async () => {
     app = await createApp();
@@ -72,7 +78,10 @@ describe('order status realtime (e2e)', () => {
     dataSource = app.get(DataSource);
   });
   afterAll(() => app.close());
-  beforeEach(() => resetDatabase(dataSource));
+  beforeEach(async () => {
+    await resetDatabase(dataSource);
+    admin = await bearer(app, await given(dataSource).user({ role: 'admin' }));
+  });
   afterEach(() => {
     sockets.splice(0).forEach((socket) => socket.close());
   });
@@ -85,26 +94,41 @@ describe('order status realtime (e2e)', () => {
 
     const skipped = await api()
       .patch(`/orders/${order.id}/status`)
+      .set(admin)
       .send({ status: 'delivered' })
       .expect(409);
     expect(skipped.body.detail).toContain('processing to delivered');
 
     await api()
       .patch(`/orders/${order.id}/status`)
+      .set(admin)
       .send({ status: 'teleported' })
       .expect(400);
     await api()
       .patch('/orders/424242/status')
+      .set(admin)
       .send({ status: 'shipped' })
       .expect(404);
+    const buyer = await given(dataSource).user();
+    const asBuyer = await bearer(app, buyer);
+    await api()
+      .patch(`/orders/${order.id}/status`)
+      .set(asBuyer)
+      .send({ status: 'shipped' })
+      .expect(403);
 
-    const stored = await api().get(`/orders/${order.id}`).expect(200);
+    const stored = await api()
+      .get(`/orders/${order.id}`)
+      .set(admin)
+      .expect(200);
     expect(stored.body.status).toBe('processing');
   });
 
   it('streams status changes over SSE to the owner and replays the ones missed after Last-Event-ID', async () => {
-    const order = await given(dataSource).order();
-    const owner = { 'X-User-Id': order.userId };
+    const { user, order: newOrder } = given(dataSource);
+    const buyer = await user();
+    const order = await newOrder(undefined, { userId: buyer.id });
+    const owner = await bearer(app, buyer);
     for (const status of [
       'processing',
       'shipped',
@@ -143,14 +167,15 @@ describe('order status realtime (e2e)', () => {
     const placed = await order();
 
     const anonymous = await fetch(`${base}/orders/${placed.id}/events`);
-    expect(anonymous.status).toBe(400);
+    expect(anonymous.status).toBe(401);
     expect(anonymous.headers.get('content-type')).toContain(
       'application/problem+json',
     );
-    expect((await anonymous.json()).detail).toContain('x-user-id');
+    expect((await anonymous.json()).detail).toContain('bearer token');
 
+    const asStranger = await bearer(app, stranger);
     const foreign = await fetch(`${base}/orders/${placed.id}/events`, {
-      headers: { 'X-User-Id': stranger.id },
+      headers: asStranger,
     });
     expect(foreign.status).toBe(403);
     expect(await foreign.json()).toMatchObject({
@@ -159,14 +184,16 @@ describe('order status realtime (e2e)', () => {
     });
 
     const missing = await fetch(`${base}/orders/424242/events`, {
-      headers: { 'X-User-Id': stranger.id },
+      headers: asStranger,
     });
     expect(missing.status).toBe(404);
   });
 
   it('keeps the event numbering across an application restart', async () => {
-    const order = await given(dataSource).order();
-    const owner = { 'X-User-Id': order.userId };
+    const { user, order: newOrder } = given(dataSource);
+    const buyer = await user();
+    const order = await newOrder(undefined, { userId: buyer.id });
+    const owner = await bearer(app, buyer);
     await changeStatus(order.id, 'processing');
     await changeStatus(order.id, 'shipped');
 
@@ -194,8 +221,12 @@ describe('order status realtime (e2e)', () => {
     const orderA = await order(undefined, { userId: alice.id });
     const orderB = await order(undefined, { userId: bob.id });
 
-    const aliceSocket = connect({ userId: Number(alice.id) });
-    const bobSocket = connect({ userId: Number(bob.id) });
+    const aliceSocket = connect({
+      token: (await tokensFor(app, alice)).access_token,
+    });
+    const bobSocket = connect({
+      token: (await tokensFor(app, bob)).access_token,
+    });
     await expect(join(aliceSocket, orderA.id)).resolves.toEqual({
       ok: true,
       room: `orders:${orderA.id}`,

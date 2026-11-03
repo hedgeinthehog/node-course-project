@@ -16,6 +16,8 @@ jobs:
       BROKER_URL: amqp://marketplace:${{ secrets.BROKER_PASSWORD || 'marketplace_dev' }}@127.0.0.1:5672
       REDIS_URL: redis://127.0.0.1:6379
       REDIS_QUEUE_URL: redis://127.0.0.1:6382
+      JWT_KID: ci
+      REFRESH_TOKEN_PEPPER: ${{ secrets.REFRESH_TOKEN_PEPPER || 'ci-pepper-0123456789abcdef' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -24,6 +26,8 @@ jobs:
           cache: npm
       - run: docker compose up -d --wait postgres pgbouncer rabbitmq redis-cache redis-queue
       - run: npm ci
+      - name: One-off ES256 key pair for this run (the real key lives in the vault)
+        run: node scripts/jwt-keys.mjs ci | grep -E '^JWT_(PRIVATE|PUBLIC)_KEY=' >> "$GITHUB_ENV"
       - run: npx tsc --noEmit
       - run: npm run lint
       - run: npm run build
@@ -44,6 +48,9 @@ jobs:
       - run: npm run demo:session
       - run: npm run demo:ratelimit
       - run: npm run demo:queue
+      - run: npm run demo:auth
+      - run: npm run demo:reuse
+      - run: npm run demo:rbac
       - run: bash scripts/with-secrets.sh dev bash scripts/backup.sh
       - run: bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
       - run: npx redocly lint openapi/openapi.yaml

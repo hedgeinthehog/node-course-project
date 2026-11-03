@@ -1,11 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
+import { hashPassword } from '../../../src/auth/password';
 import { OrderItem } from '../../../src/entities/order-item.entity';
 import { Order } from '../../../src/entities/order.entity';
 import { Product } from '../../../src/entities/product.entity';
 import { User } from '../../../src/entities/user.entity';
 
 let sequence = 0;
+export const TEST_PASSWORD = 'password';
+let passwordHash: Promise<string> | undefined;
 
 export function aUser(overrides: Partial<User> = {}): Partial<User> {
   const n = ++sequence;
@@ -13,6 +16,7 @@ export function aUser(overrides: Partial<User> = {}): Partial<User> {
     email: `user-${n}-${randomUUID()}@example.com`,
     name: `User ${n}`,
     balanceCents: '1000000',
+    role: 'buyer',
     ...overrides,
   };
 }
@@ -51,8 +55,15 @@ export function given(dataSource: DataSource) {
   const orders = dataSource.getRepository(Order);
   const items = dataSource.getRepository(OrderItem);
 
-  const user = (overrides: Partial<User> = {}) =>
-    users.save(users.create(aUser(overrides)));
+  const user = async (overrides: Partial<User> = {}) =>
+    users.save(
+      users.create(
+        aUser({
+          passwordHash: await (passwordHash ??= hashPassword(TEST_PASSWORD)),
+          ...overrides,
+        }),
+      ),
+    );
 
   const product = async (overrides: Partial<Product> = {}) =>
     products.save(
