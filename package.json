@@ -32,6 +32,7 @@
     "events:topology": "bash scripts/with-secrets.sh dev node dist/events-topology.js",
     "consume": "bash scripts/with-secrets.sh dev node dist/consumer.js",
     "relay": "bash scripts/with-secrets.sh dev node dist/relay.js",
+    "prune": "bash scripts/with-secrets.sh dev node dist/prune.js",
     "demo:publish": "bash scripts/with-secrets.sh dev node dist/demo-publish.js",
     "demo:dlq": "bash scripts/with-secrets.sh dev node dist/demo-dlq.js",
     "demo:duplicate": "bash scripts/with-secrets.sh dev node dist/demo-duplicate.js",

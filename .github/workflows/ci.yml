@@ -37,6 +37,7 @@ jobs:
       - run: npm run demo:outbox
       - run: npm run demo:crash-write
       - run: npm run demo:crash-relay
+      - run: npm run prune
       - run: bash scripts/with-secrets.sh dev bash scripts/backup.sh
       - run: bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
       - run: npx redocly lint openapi/openapi.yaml

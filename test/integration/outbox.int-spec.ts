@@ -17,8 +17,15 @@ import {
 } from '../../src/events/consumer';
 import { orderPlaced } from '../../src/events/order-placed';
 import { EventPublisher } from '../../src/events/publisher';
-import { OutboxRelay } from '../../src/events/relay';
-import { ORDER_PLACED_QUEUE } from '../../src/events/topology';
+import {
+  OUTBOX_MAX_ATTEMPTS,
+  OutboxRelay,
+  RelayPublisher,
+} from '../../src/events/relay';
+import {
+  DEAD_LETTER_QUEUE,
+  ORDER_PLACED_QUEUE,
+} from '../../src/events/topology';
 import { toOrderDto } from '../../src/orders/dto/order.dto';
 import { placeOrder } from '../../src/orders/place-order';
 import { given } from './testkit/builders';
@@ -72,6 +79,7 @@ describe('transactional outbox', () => {
   beforeEach(async () => {
     await resetDatabase(dataSource);
     await channel.purgeQueue(ORDER_PLACED_QUEUE);
+    await channel.purgeQueue(DEAD_LETTER_QUEUE);
     signals.length = 0;
   });
   afterEach(async () => {
@@ -161,8 +169,8 @@ describe('transactional outbox', () => {
     const run = await new OutboxRelay(dataSource, publisher).runOnce();
     const again = await new OutboxRelay(dataSource, publisher).runOnce();
 
-    expect(run).toEqual({ published: 2, failed: 0 });
-    expect(again).toEqual({ published: 0, failed: 0 });
+    expect(run).toEqual({ published: 2, failed: 0, dead: 0 });
+    expect(again).toEqual({ published: 0, failed: 0, dead: 0 });
     const rows = await outboxRows();
     expect(rows.map((r) => [r.aggregateId, r.attempts])).toEqual([
       [a.id, 1],
@@ -177,6 +185,66 @@ describe('transactional outbox', () => {
     expect(
       second && JSON.parse(second.content.toString()).payload.orderId,
     ).toBe(Number(b.id));
+    await expect(
+      channel.get(ORDER_PLACED_QUEUE, { noAck: true }),
+    ).resolves.toBe(false);
+  });
+
+  it('backs off a row whose publish keeps failing and dead-letters it after the attempt limit', async () => {
+    const { input } = await orderFor();
+    const order = await checkout(dataSource, input);
+    const broken: RelayPublisher = {
+      publish: () => Promise.reject(new Error('broker says no')),
+      deadLetter: (event, reason) => publisher.deadLetter(event, reason),
+    };
+    const relay = new OutboxRelay(dataSource, broken);
+    const row = () =>
+      dataSource
+        .getRepository(OutboxEvent)
+        .findOneByOrFail({ aggregateId: order.id });
+
+    expect(await relay.runOnce()).toEqual({ published: 0, failed: 1, dead: 0 });
+    const backedOff = await row();
+    expect(backedOff).toMatchObject({
+      attempts: 1,
+      lastError: 'broker says no',
+      failedAt: null,
+    });
+    expect(backedOff.nextAttemptAt.getTime()).toBeGreaterThan(
+      Date.now() + 1000,
+    );
+    expect(await relay.runOnce()).toEqual({ published: 0, failed: 0, dead: 0 });
+
+    for (let attempt = 2; attempt < OUTBOX_MAX_ATTEMPTS; attempt++) {
+      await dataSource.query(`UPDATE outbox SET next_attempt_at = now()`);
+      expect(await relay.runOnce()).toEqual({
+        published: 0,
+        failed: 1,
+        dead: 0,
+      });
+    }
+    await dataSource.query(`UPDATE outbox SET next_attempt_at = now()`);
+    expect(await relay.runOnce()).toEqual({ published: 0, failed: 0, dead: 1 });
+
+    const buried = await row();
+    expect(buried).toMatchObject({
+      attempts: OUTBOX_MAX_ATTEMPTS,
+      publishedAt: null,
+    });
+    expect(buried.failedAt).not.toBeNull();
+    const dead = await channel.get(DEAD_LETTER_QUEUE, { noAck: true });
+    if (!dead) throw new Error('dead-letter queue is empty');
+    expect(dead.properties.headers?.['x-relay-failure']).toContain(
+      'broker says no',
+    );
+    expect(JSON.parse(dead.content.toString())).toEqual(
+      orderPlaced(toOrderDto(order)),
+    );
+    expect(await new OutboxRelay(dataSource, publisher).runOnce()).toEqual({
+      published: 0,
+      failed: 0,
+      dead: 0,
+    });
     await expect(
       channel.get(ORDER_PLACED_QUEUE, { noAck: true }),
     ).resolves.toBe(false);
@@ -207,7 +275,7 @@ describe('transactional outbox', () => {
       () => signals.filter((s) => s.stage === 'settled').length === 2,
     );
 
-    expect(run).toEqual({ published: 1, failed: 0 });
+    expect(run).toEqual({ published: 1, failed: 0, dead: 0 });
     expect(
       signals.filter((s) => s.stage === 'delivered').map((s) => s.eventId),
     ).toEqual([event.eventId, event.eventId]);

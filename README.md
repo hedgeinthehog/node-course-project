@@ -553,7 +553,7 @@ exit 1 без дампа, тож бекап не може мовчки знят�
 docker compose exec -T postgres pg_restore --list < backups/<файл>.dump
 ```
 
-Розклад — `backup.cron`: щоночі о 03:00 через ту саму обгортку, лог у `backups/backup.log`. Рядок сам
+Розклад — `backup.cron`: щоночі о 03:00 через ту саму обгортку, лог у `backups/backup.log`; другий рядок о 03:30 — `npm run prune` для таблиць ДЗ #22 (розділ «Outbox та ідемпотентність»). Рядок сам
 створює теку `backups` (`mkdir -p`), бо редирект логу відкривається раніше, ніж стартує скрипт.
 
 ### Restore-drill
@@ -593,7 +593,7 @@ compose для перших чотирьох команд не потрібен.
 
 | Команда | Що запускає | Результат прогону |
 | --- | --- | --- |
-| `npm run test:integration` | `test/integration/` — репозиторії, checkout, воркер, outbox і relay, споживач `order.placed` проти Postgres і RabbitMQ у testcontainers | 6 наборів, 27 тестів |
+| `npm run test:integration` | `test/integration/` — репозиторії, checkout, воркер, outbox і relay, споживач `order.placed` проти Postgres і RabbitMQ у testcontainers | 6 наборів, 28 тестів |
 | `npm run test:e2e` | `test/e2e/` — повний `AppModule` через supertest: замовлення, ключ ідемпотентності, realtime, relay `order.placed` | 11 тестів |
 | `npm run test:contract` | `test/contract/consumer.pact-spec.ts` — consumer-тест, пише `pacts/*.json` | 3 interactions |
 | `npm run verify:provider` | `test/contract/provider.pact-spec.ts` — справжній застосунок проти контракту | 3 × `has a matching body (OK)` |
@@ -642,7 +642,7 @@ compose для перших чотирьох команд не потрібен.
 | `checkout.int-spec.ts` | атомарність транзакції, повний відкат при нестачі коштів або товару, 20 конкурентних checkout на 5 одиниць без oversell |
 | `tasks-worker.int-spec.ts` | `FOR UPDATE SKIP LOCKED` (рівно один раз на трьох воркерах), повтор, `failed` після ліміту спроб із відкатом savepoint |
 | `order-placed-consumer.int-spec.ts` | справжній RabbitMQ: дубль події → один рядок `shipments` і одна позначка в `processed_messages`; ефект, що падає → три повтори через retry-чергу з паузою і DLQ з `rejected`; повідомлення поза контрактом → DLQ з `rejected` без повторів; crash-loop (`requeue` × 4) → DLQ з `delivery_limit` (ДЗ #19) |
-| `outbox.int-spec.ts` | замовлення і рядок outbox одним COMMIT; падіння після вставки в outbox відкочує обидва; ключ ідемпотентності: replay, `422` на інше тіло, пʼять паралельних запитів з одним ключем → одне замовлення, невдалий запит ключа не лишає; relay публікує по порядку і позначає `published_at`; падіння relay між publish і UPDATE → подія вдруге, ефект один, inbox з однією позначкою (ДЗ #22) |
+| `outbox.int-spec.ts` | замовлення і рядок outbox одним COMMIT; падіння після вставки в outbox відкочує обидва; ключ ідемпотентності: replay, `422` на інше тіло, пʼять паралельних запитів з одним ключем → одне замовлення, невдалий запит ключа не лишає; relay публікує по порядку і позначає `published_at`; publish, що падає завжди → backoff, після пʼяти спроб подія в DLQ і `failed_at`; падіння relay між publish і UPDATE → подія вдруге, ефект один, inbox з однією позначкою (ДЗ #22) |
 | `test/e2e/orders.e2e-spec.ts` | створити товар → оформити замовлення → прочитати обидва → повтор з тим самим `Idempotency-Key`; `400` без ключа, `404` на невідоме замовлення, `409` при нестачі товару, `422` на той самий ключ з іншим тілом; relay усередині API виносить `order.placed` рівно один раз, повтор за ключем — не публікує (ДЗ #19, #22) |
 | `test/e2e/realtime.e2e-spec.ts` | життєвий цикл статусів і `409`; SSE: `Last-Event-ID`, `400`/`403`/`404` для не-власника, нумерація після рестарту; WS: кімнати, `forbidden`/`unauthenticated` (ДЗ #18) |
 
@@ -1058,18 +1058,22 @@ dlq-depth=1
 
 ### Таблиця outbox
 
-Міграція `Outbox` (`src/migrations/*-Outbox.ts`, не `synchronize`) створює три таблиці:
+Міграція `Outbox` (`src/migrations/*-Outbox.ts`, не `synchronize`) створює три таблиці, `OutboxRetry` додає до
+`outbox` поля backoff (`next_attempt_at`, `failed_at`, `last_error`):
 
 | Таблиця | Поля | Навіщо |
 | --- | --- | --- |
-| `outbox` | `id`, `aggregate_type`, `aggregate_id`, `type`, `payload jsonb`, `created_at`, `published_at` (NULL = ще не винесено), `attempts`; частковий індекс `idx_outbox_unpublished (created_at, id) WHERE published_at IS NULL` | ролі полів — ті самі, що читає Debezium Outbox Event Router; імена колонок snake_case, тож при переході на CDC їх треба буде або перейменувати на `aggregatetype`/`aggregateid`, або задати `route.by.field=aggregate_type` і `table.field.event.key=aggregate_id` |
+| `outbox` | `id`, `aggregate_type`, `aggregate_id`, `type`, `payload jsonb`, `created_at`, `published_at` (NULL = ще не винесено), `attempts`, `next_attempt_at`, `failed_at`, `last_error`; частковий індекс `idx_outbox_unpublished (created_at, id) WHERE published_at IS NULL` | ролі полів — ті самі, що читає Debezium Outbox Event Router; імена колонок snake_case, тож при переході на CDC їх треба буде або перейменувати на `aggregatetype`/`aggregateid`, або задати `route.by.field=aggregate_type` і `table.field.event.key=aggregate_id` |
 | `processed_messages` | `message_id uuid`, `consumer text`, `processed_at`; PK `(message_id, consumer)` | inbox споживача: позначка «цей `eventId` цей консюмер уже обробив» |
 | `idempotency_keys` | `key text` PK, `fingerprint`, `result jsonb`, `created_at` | ключі ідемпотентності API-краю, переживають рестарт і спільні для всіх інстансів |
 
-Чистка: `outbox` росте разом із замовленнями, а частковий індекс relay цього не помічає — у ньому лише
-`published_at IS NULL`, тож він лишається малим; опубліковані рядки прибираються періодично, наприклад
-`DELETE FROM outbox WHERE published_at < now() - interval '7 days'` (cron поруч із `backup.cron`); до CDC ці
-рядки більше нікому не потрібні.
+Чистка — `npm run prune` (`src/prune.ts`, через `with-secrets.sh`; у `backup.cron` це другий рядок, щоночі о
+03:30, лог у `backups/prune.log`). Він друкує `таблиця=видалено` і прибирає: з `outbox` — опубліковані рядки
+старші за 7 днів (до CDC вони нікому не потрібні) і поховані (`failed_at`) старші за 30; з `idempotency_keys`
+— ключі старші за 24 години: це вікно повтору клієнта, після нього той самий ключ створить нове замовлення,
+і ця межа гарантії названа тут свідомо; з `processed_messages` — позначки старші за 30 днів, тобто довше за
+будь-який повтор доставки (retry-черга, DLQ-реплей). Частковий індекс relay росту таблиць не помічає — у
+ньому лише `published_at IS NULL`.
 
 ### Бізнес-запис і outbox одним COMMIT
 
@@ -1094,8 +1098,16 @@ publish (або падіння між ними) дасть рядок «вине
 У поточному порядку падіння між publish і UPDATE відкочує транзакцію, `published_at` лишається NULL, і
 наступний прохід публікує подію **вдруге** — це дубль, і його лікує дедуплікація на споживачі. Вибір тут не між
 «добре» і «погано», а між дублем і втратою; дубль дешевший. Те саме стосується помилки publish: відповідь
-брокера могла загубитись, подія вже може бути в черзі, тому relay лише збільшує `attempts` і пробує знову, а
-дедуп на споживачі обовʼязковий незалежно від акуратності relay.
+брокера могла загубитись, подія вже може бути в черзі, тому relay не відкочує рядок як «не відправлений», а
+пробує знову, і дедуп на споживачі обовʼязковий незалежно від акуратності relay.
+
+Повтор не крутиться щосекунди: невдалий publish записує `attempts + 1`, `last_error` і `next_attempt_at =
+now() + min(2^attempts, 300) с`, а вибірка relay бере лише рядки з `next_attempt_at <= now()` — експоненційний
+backoff від 2 с до 5 хв. Після `OUTBOX_MAX_ATTEMPTS` = 5 relay сам публікує подію в DLX `shop.events.dlx` із
+заголовком `x-relay-failure` і ставить `failed_at`: рядок виходить із вибірки, а повідомлення чекає оператора в
+`shop.events.dlq` поруч з іншими отруєними. Якщо недоступний і DLX (лежить сам брокер), рядок лишається у
+вибірці з максимальною паузою — брокер повернеться, relay дожене. Інтеграційний тест ганяє цей цикл з
+паблішером, який падає завжди.
 
 Порядок доставки `ORDER BY created_at, id` задає лише порядок вибірки: `SKIP LOCKED` розкидає рядки між
 воркерами, а `bigserial` видає номер на `nextval`, видимим же рядок стає на COMMIT, — тому в relay стоїть

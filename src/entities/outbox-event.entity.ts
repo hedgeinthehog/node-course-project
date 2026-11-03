@@ -34,4 +34,17 @@ export class OutboxEvent {
 
   @Column({ type: 'integer', default: 0 })
   attempts: number;
+
+  @Column({
+    name: 'next_attempt_at',
+    type: 'timestamptz',
+    default: () => 'now()',
+  })
+  nextAttemptAt: Date;
+
+  @Column({ name: 'failed_at', type: 'timestamptz', nullable: true })
+  failedAt: Date | null;
+
+  @Column({ name: 'last_error', type: 'text', nullable: true })
+  lastError: string | null;
 }

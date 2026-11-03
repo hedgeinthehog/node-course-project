@@ -2,7 +2,7 @@ import type { OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import amqp from 'amqplib';
 import type { ChannelModel, ConfirmChannel } from 'amqplib';
 import { DomainEvent } from './order-placed';
-import { EVENTS_EXCHANGE } from './topology';
+import { DEAD_LETTER_EXCHANGE, EVENTS_EXCHANGE } from './topology';
 
 const reason = (err: unknown) =>
   err instanceof AggregateError
@@ -31,20 +31,30 @@ export class EventPublisher implements OnModuleInit, OnModuleDestroy {
     await this.open();
   }
 
-  async publish(event: DomainEvent<string, unknown>): Promise<void> {
+  publish(event: DomainEvent<string, unknown>): Promise<void> {
+    return this.send(EVENTS_EXCHANGE, event);
+  }
+
+  deadLetter(event: DomainEvent<string, unknown>, reason: string) {
+    return this.send(DEAD_LETTER_EXCHANGE, event, {
+      'x-relay-failure': reason,
+    });
+  }
+
+  private async send(
+    exchange: string,
+    event: DomainEvent<string, unknown>,
+    headers?: Record<string, string>,
+  ): Promise<void> {
     const channel = this.channel ?? (await this.open());
-    channel.publish(
-      EVENTS_EXCHANGE,
-      event.type,
-      Buffer.from(JSON.stringify(event)),
-      {
-        persistent: true,
-        contentType: 'application/json',
-        messageId: event.eventId,
-        type: event.type,
-        timestamp: Math.floor(Date.parse(event.occurredAt) / 1000),
-      },
-    );
+    channel.publish(exchange, event.type, Buffer.from(JSON.stringify(event)), {
+      persistent: true,
+      contentType: 'application/json',
+      messageId: event.eventId,
+      type: event.type,
+      timestamp: Math.floor(Date.parse(event.occurredAt) / 1000),
+      headers,
+    });
     await channel.waitForConfirms();
   }
 
