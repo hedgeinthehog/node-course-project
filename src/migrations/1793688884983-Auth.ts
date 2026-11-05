@@ -12,6 +12,9 @@ export class Auth1793688884983 implements MigrationInterface {
             )
         `);
     await queryRunner.query(`
+            CREATE INDEX "idx_access_denylist_expires_at" ON "access_denylist" ("expires_at")
+        `);
+    await queryRunner.query(`
             CREATE TABLE "refresh_tokens" (
                 "id" uuid NOT NULL,
                 "user_id" bigint NOT NULL,
@@ -69,6 +72,9 @@ export class Auth1793688884983 implements MigrationInterface {
         `);
     await queryRunner.query(`
             DROP TABLE "refresh_tokens"
+        `);
+    await queryRunner.query(`
+            DROP INDEX "public"."idx_access_denylist_expires_at"
         `);
     await queryRunner.query(`
             DROP TABLE "access_denylist"

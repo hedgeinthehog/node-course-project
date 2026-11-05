@@ -71,9 +71,9 @@ PORT=8080 npm start
 | `REDIS_QUEUE_URL` | так | — | Redis під стан (`noeviction` + AOF), напр. `redis://localhost:6382`; черга BullMQ, сесії, лічильники ліміту | сховище: те саме |
 | `RATE_LIMIT` | ні | `100` | скільки запитів клієнта пропускає ковзне вікно | `.env` (dev) / env оточення (prod) |
 | `RATE_LIMIT_WINDOW_MS` | ні | `10000` | довжина ковзного вікна ліміту, мс | `.env` (dev) / env оточення (prod) |
-| `JWT_KID` | так | — | `kid` ключа підпису access-токенів (ДЗ #24) | сховище: локальний `.env` поза git (dev), env оточення платформи (prod) |
+| `JWT_KID` | так | — | `kid` ключа підпису access-токенів (ДЗ #24); має бути серед `JWT_PUBLIC_KEYS` | сховище: локальний `.env` поза git (dev), env оточення платформи (prod) |
 | `JWT_PRIVATE_KEY` | так | — | base64 від PEM PKCS#8 приватного ключа ES256 | сховище: те саме; дев-пару генерує `node scripts/jwt-keys.mjs >> .env` |
-| `JWT_PUBLIC_KEY` | так | — | base64 від PEM SPKI публічного ключа | сховище: те саме |
+| `JWT_PUBLIC_KEYS` | так | — | keyring для перевірки підпису: `kid:base64` від PEM SPKI через кому, напр. `2026-11:MFkw…,2026-05:MFkw…`; під час ротації — старий і новий ключ разом | сховище: те саме |
 | `REFRESH_TOKEN_PEPPER` | так | — | HMAC-«перець» для хешів refresh-токенів, ≥ 16 байт | сховище: те саме |
 | `PACT_BROKER_URL` | ні | — | адреса Pact Broker для контрактних тестів (`http://127.0.0.1:9292` для compose); застосунок її не використовує, читає лише тестовий код | сховище: локальний `.env` поза git (dev), secrets GitHub (CI) |
 | `PACT_BROKER_TOKEN` | ні | — | bearer-токен брокера; для локального compose-брокера порожній | сховище: локальний `.env` поза git (dev), secrets GitHub (CI) |
@@ -668,7 +668,7 @@ compose для перших чотирьох команд не потрібен.
 | `outbox.int-spec.ts` | замовлення і рядок outbox одним COMMIT; падіння після вставки в outbox відкочує обидва; ключ ідемпотентності: replay, `422` на інше тіло, пʼять паралельних запитів з одним ключем → одне замовлення, невдалий запит ключа не лишає; relay публікує по порядку і позначає `published_at`; publish, що падає завжди → backoff, після пʼяти спроб подія в DLQ і `failed_at`; падіння relay між publish і UPDATE → подія вдруге, ефект один, inbox з однією позначкою (ДЗ #22) |
 | `redis.int-spec.ts` | 30 одночасних промахів → один виклик loader-а, TTL із джитером, лок не знімає чужий токен, 25 промахів на відсутній id → один виклик і негативний кеш; сесія подовжує TTL на читанні; ліміт спільний для двох екземплярів і точний під 50 паралельними запитами; черга дедуплікує за `jobId` і доводить падучу задачу до `completed` за три спроби (ДЗ #23) |
 | `test/e2e/redis.e2e-spec.ts` | картка товару з кешу з TTL 295–360 с, інвалідація після замовлення; `POST /sessions` → `GET /sessions/me` і будь-який запит із `X-Session-Id` подовжують TTL, `401` на невідомий id; `429` problem+json із `Retry-After` після ліміту, `/health` поза лімітом (ДЗ #23) |
-| `test/e2e/auth.e2e-spec.ts` | логін ES256 (`kid`, `alg`), `401` на пароль/без токена/зіпсований; логаут як дві дії (`access_denylist` + сімʼя); повторне використання refresh валить сімʼю разом із чесним клієнтом; `401` ≠ `403` на власності, ролі, чужому `user_id`/`seller_id` і підробленому payload; список замовлень лише своїх, адмін бачить усі (ДЗ #24) |
+| `test/e2e/auth.e2e-spec.ts` | логін ES256 (`kid`, `alg`), `401` на пароль/без токена/зіпсований; keyring із двох `kid`: токен другого ключа проходить, невідомий `kid` — `401`; логаут як дві дії (`access_denylist` + сімʼя); повторне використання refresh валить сімʼю разом із чесним клієнтом; `401` ≠ `403` на власності, ролі, чужому `user_id`/`seller_id` і підробленому payload; список замовлень лише своїх, адмін бачить усі (ДЗ #24) |
 | `test/e2e/orders.e2e-spec.ts` | створити товар → оформити замовлення → прочитати обидва → повтор з тим самим `Idempotency-Key`; `400` без ключа, `404` на невідоме замовлення, `409` при нестачі товару, `422` на той самий ключ з іншим тілом; relay усередині API виносить `order.placed` рівно один раз, повтор за ключем — не публікує (ДЗ #19, #22) |
 | `test/e2e/realtime.e2e-spec.ts` | життєвий цикл статусів і `409`; SSE: `Last-Event-ID`, `400`/`403`/`404` для не-власника, нумерація після рестарту; WS: кімнати, `forbidden`/`unauthenticated` (ДЗ #18) |
 
@@ -1421,8 +1421,8 @@ scheduled-runs=4
 | Змінна | Джерело | Навіщо | Формат |
 | --- | --- | --- | --- |
 | `JWT_PRIVATE_KEY` | сховище (#11) | підпис access-токенів | base64 від PEM PKCS#8, EC P-256 |
-| `JWT_PUBLIC_KEY` | сховище (#11) | перевірка підпису | base64 від PEM SPKI |
-| `JWT_KID` | сховище (#11) | `kid` у заголовку токена: яким ключем підписано | рядок, напр. `dev`, `2026-11` |
+| `JWT_PUBLIC_KEYS` | сховище (#11) | keyring для перевірки підпису | `kid:base64` від PEM SPKI через кому; один запис або два під час ротації |
+| `JWT_KID` | сховище (#11) | `kid` у заголовку токена: яким ключем підписано; має бути в keyring | рядок `[A-Za-z0-9_.-]+`, напр. `dev`, `2026-11` |
 | `REFRESH_TOKEN_PEPPER` | сховище (#11) | HMAC-«перець» для хешів refresh-токенів | випадковий рядок ≥ 16 байт |
 
 Дефолтів у схемі (`src/config/env.schema.ts`) немає — дефолт тут дорівнював би зашитому в код ключу. Схема
@@ -1458,7 +1458,8 @@ scheduled-runs=4
 
 Міграція `Auth` (не `synchronize`): `users.role` (`buyer` / `seller` / `admin`, CHECK) і `users.password_hash`;
 `refresh_tokens (id, user_id, family_id, token_hash UNIQUE, created_at, expires_at, used_at, revoked_at)` з
-індексами по `token_hash` і `family_id`; `access_denylist (jti, expires_at)`.
+індексами по `token_hash` і `family_id`; `access_denylist (jti, expires_at)` з індексом по `expires_at` — ним
+`npm run prune` видаляє протухлі `jti` без seq scan (PK по `jti` тут не допомагає).
 
 ### Ротація з детекцією повтору
 
@@ -1511,11 +1512,15 @@ access-токени сімʼї, вбитої детекцією повтору. 
 
 ### Ротація ключа підпису без простою
 
-Заголовок `kid` і keyring у `AccessTokens`: новий ключ спершу додається у keyring **лише для верифікації**
-(обидва `kid` валідні), потім підпис перемикається на новий `kid`, і лише коли минув `ACCESS_TTL_S` від
-перемикання — старий `kid` прибирається. У цьому вікні overlap жоден виданий токен не стає `401` без причини.
-Токен із невідомим `kid` відкидається одразу — це і захист від підміни ключа, і сигнал, що ротація пройшла
-неправильно.
+Заголовок `kid` і keyring у `AccessTokens`: `JWT_PUBLIC_KEYS` — список `kid:ключ`, підписує лише пара
+`JWT_KID`/`JWT_PRIVATE_KEY`. Ротація — три зміни конфігу без простою: (1) новий публічний ключ додається у
+`JWT_PUBLIC_KEYS` **лише для верифікації** — обидва `kid` валідні; (2) `JWT_KID`/`JWT_PRIVATE_KEY` перемикаються
+на новий ключ; (3) коли від перемикання минув `ACCESS_TTL_S` — старий `kid` прибирається зі списку. У цьому
+вікні overlap жоден виданий токен не стає `401` без причини. На старті застосунок перевіряє, що `JWT_KID` є в
+списку і що приватний ключ відповідає саме його публічному: переплутаний ключ падає на конфігу, а не `401` у
+всіх клієнтів; у лог іде `signing key kid=… verifying kids=…`. Токен із невідомим `kid` відкидається одразу —
+це і захист від підміни ключа, і сигнал, що ротація пройшла неправильно. `auth.e2e-spec.ts` ганяє застосунок
+із keyring із двох `kid`: токен, підписаний другим ключем, проходить, той самий ключ під чужим `kid` — `401`.
 
 ### Демо
 
@@ -1583,6 +1588,8 @@ export BROKER_URL=amqp://marketplace:marketplace_dev@127.0.0.1:5672
 export REDIS_URL=redis://127.0.0.1:6379
 export REDIS_QUEUE_URL=redis://127.0.0.1:6382
 export SKIP_VAULT=1
+# те самі база і роль для застосунку (npm run start / start:vault): URL без облікових даних + файл user:password
+export DB_URL=postgres://127.0.0.1:6432/marketplace DB_PASSWORD_FILE=secrets/db_password.example
 # одноразова пара ES256 для прогону; PEM їде в base64, щоб багаторядковість не поїхала
 node -e 'const {generateKeyPairSync}=require("node:crypto");
 const k=generateKeyPairSync("ec",{namedCurve:"P-256",
@@ -1593,15 +1600,17 @@ fs.writeFileSync("/tmp/priv.b64",Buffer.from(k.privateKey).toString("base64"));
 fs.writeFileSync("/tmp/pub.b64",Buffer.from(k.publicKey).toString("base64"));'
 export JWT_KID=grader
 export JWT_PRIVATE_KEY="$(cat /tmp/priv.b64)"
-export JWT_PUBLIC_KEY="$(cat /tmp/pub.b64)"
+export JWT_PUBLIC_KEYS="grader:$(cat /tmp/pub.b64)"
 export REFRESH_TOKEN_PEPPER=grader-pepper-0123456789abcdef
 npm ci && npm run build && npm run migrate && npm run events:topology
 bash scripts/with-secrets.sh dev bash scripts/backup.sh
 bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
 ```
 
-`DB_HOST`/`DB_PORT` — це PgBouncer (`127.0.0.1:6432`), не Postgres напряму; у формі URL це
-`postgres://marketplace_a:marketplace_dev@127.0.0.1:6432/marketplace`. Дев-роль `marketplace_a` /
+`DB_HOST`/`DB_PORT` — це PgBouncer (`127.0.0.1:6432`), не Postgres напряму. Пʼятірку `DB_*` читають скрипти
+(міграції, seed, демо, бекап); сам застосунок (`npm run start`, `npm run start:vault`) читає `DB_URL` без
+облікових даних і `DB_PASSWORD_FILE` (`src/config/env.schema.ts`), тому в блоці є й вони:
+`secrets/db_password.example` — та сама дев-роль у форматі `user:password`. Дев-роль `marketplace_a` /
 `marketplace_dev` створює `db/init.sql` при першому старті тому; секретом вона не є. Пароль ролей застосунку
 можна задати змінною `DB_PASSWORD` під час першого `docker compose up` (compose передає її в
 `APP_DB_PASSWORD`, `init.sql` читає її через `\set`) — так робить CI зі своїх secrets. `SKIP_VAULT=1`

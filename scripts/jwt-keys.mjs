@@ -8,5 +8,5 @@ const { privateKey, publicKey } = generateKeyPairSync('ec', {
 });
 console.log(`JWT_KID=${kid}`);
 console.log(`JWT_PRIVATE_KEY=${Buffer.from(privateKey).toString('base64')}`);
-console.log(`JWT_PUBLIC_KEY=${Buffer.from(publicKey).toString('base64')}`);
+console.log(`JWT_PUBLIC_KEYS=${kid}:${Buffer.from(publicKey).toString('base64')}`);
 console.log(`REFRESH_TOKEN_PEPPER=${randomBytes(32).toString('base64url')}`);

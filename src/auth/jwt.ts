@@ -33,19 +33,43 @@ export class AccessTokens {
 
   constructor(
     private readonly privateKey: KeyObject,
-    publicKey: KeyObject,
+    keyring: Map<string, KeyObject>,
     readonly kid: string,
   ) {
-    this.keyring = new Map([[kid, publicKey]]);
+    const active = keyring.get(kid);
+    if (!active) {
+      throw new Error(
+        `JWT_PUBLIC_KEYS has no entry for the signing kid "${kid}"`,
+      );
+    }
+    if (!createPublicKey(privateKey).equals(active)) {
+      throw new Error(
+        `JWT_PRIVATE_KEY does not match the public key listed for kid "${kid}"`,
+      );
+    }
+    this.keyring = keyring;
   }
 
-  static fromBase64(privateB64: string, publicB64: string, kid: string) {
+  static fromBase64(
+    privateB64: string,
+    publicKeys: Record<string, string>,
+    kid: string,
+  ) {
     const pem = (b64: string) => Buffer.from(b64, 'base64').toString('utf8');
     return new AccessTokens(
       createPrivateKey(pem(privateB64)),
-      createPublicKey(pem(publicB64)),
+      new Map(
+        Object.entries(publicKeys).map(([id, b64]) => [
+          id,
+          createPublicKey(pem(b64)),
+        ]),
+      ),
       kid,
     );
+  }
+
+  get kids(): string[] {
+    return [...this.keyring.keys()];
   }
 
   static fingerprint(key: KeyObject): string {

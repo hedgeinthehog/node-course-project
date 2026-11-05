@@ -1,6 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
+import { AccessTokens } from '../../src/auth/jwt';
+import { publicKeyringSchema } from '../../src/config/env.schema';
 import { RefreshToken } from '../../src/entities/refresh-token.entity';
 import { given, TEST_PASSWORD } from '../integration/testkit/builders';
 import { resetDatabase } from '../integration/testkit/database';
@@ -56,6 +59,34 @@ describe('auth (e2e)', () => {
       .get('/orders')
       .set('Authorization', 'Bearer not-a-token')
       .expect(401);
+  });
+
+  it('verifies tokens signed by any kid in the keyring and rejects an unknown kid', async () => {
+    const buyer = await given(dataSource).user();
+    const keyring = publicKeyringSchema.parse(process.env.JWT_PUBLIC_KEYS);
+    const privateKey = process.env.TEST_PREVIOUS_JWT_PRIVATE_KEY!;
+    const previous = AccessTokens.fromBase64(privateKey, keyring, 'previous');
+    const stranger = AccessTokens.fromBase64(
+      privateKey,
+      { stranger: keyring.previous },
+      'stranger',
+    );
+
+    const rotated = await previous.sign(buyer, randomUUID());
+    await api()
+      .get('/orders')
+      .set('Authorization', `Bearer ${rotated.token}`)
+      .expect(200);
+
+    const foreign = await stranger.sign(buyer, randomUUID());
+    const rejected = await api()
+      .get('/orders')
+      .set('Authorization', `Bearer ${foreign.token}`)
+      .expect(401);
+    expect(rejected.body).toMatchObject({
+      status: 401,
+      detail: 'unknown signing key stranger',
+    });
   });
 
   it('logout revokes the refresh family and denies the access token until it expires', async () => {

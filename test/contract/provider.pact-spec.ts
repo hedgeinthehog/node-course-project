@@ -6,6 +6,7 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import type * as Pact from '@pact-foundation/pact';
 import { DataSource } from 'typeorm';
 import { AccessTokens } from '../../src/auth/jwt';
+import { publicKeyringSchema } from '../../src/config/env.schema';
 import { seedDatabase } from '../../src/seed-data';
 import { resetDatabase } from '../integration/testkit/database';
 
@@ -60,7 +61,7 @@ describe('marketplace-api provider verification', () => {
 
     const tokens = AccessTokens.fromBase64(
       process.env.JWT_PRIVATE_KEY!,
-      process.env.JWT_PUBLIC_KEY!,
+      publicKeyringSchema.parse(process.env.JWT_PUBLIC_KEYS),
       process.env.JWT_KID!,
     );
     const { token } = await tokens.sign(

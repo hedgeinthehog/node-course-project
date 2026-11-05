@@ -17,11 +17,11 @@ import { AccessTokens } from './jwt';
       useFactory: (config: ConfigService<Env, true>) => {
         const tokens = AccessTokens.fromBase64(
           config.get('JWT_PRIVATE_KEY', { infer: true }),
-          config.get('JWT_PUBLIC_KEY', { infer: true }),
+          config.get('JWT_PUBLIC_KEYS', { infer: true }),
           config.get('JWT_KID', { infer: true }),
         );
         new Logger(AccessTokens.name).log(
-          `signing key kid=${tokens.kid} fingerprint=${tokens.fingerprint()}`,
+          `signing key kid=${tokens.kid} fingerprint=${tokens.fingerprint()}, verifying kids=${tokens.kids.join(',')}`,
         );
         return tokens;
       },
