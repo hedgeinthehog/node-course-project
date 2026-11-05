@@ -27,7 +27,7 @@ cp .env.example .env
 node scripts/jwt-keys.mjs >> .env
 cp secrets/db_password.example secrets/db_password
 npm run db:up
-npm run build && npm run migrate && npm run events:topology && npm run seed
+npm run build && npm run migrate && npm run events:topology && npm run storage:init && npm run seed
 npm start
 ```
 
@@ -45,6 +45,12 @@ npm run consume
 
 ```bash
 npm run worker
+```
+
+Кеш-шар перед сховищем для публічних ассетів (локальна форма CDN з ДЗ #26, порт `EDGE_PORT`, дефолт `3200`):
+
+```bash
+npm run edge
 ```
 
 Порт API задається змінною `PORT`:
@@ -75,6 +81,11 @@ PORT=8080 npm start
 | `JWT_PRIVATE_KEY` | так | — | base64 від PEM PKCS#8 приватного ключа ES256 | сховище: те саме; дев-пару генерує `node scripts/jwt-keys.mjs >> .env` |
 | `JWT_PUBLIC_KEYS` | так | — | keyring для перевірки підпису: `kid:base64` від PEM SPKI через кому, напр. `2026-11:MFkw…,2026-05:MFkw…`; під час ротації — старий і новий ключ разом | сховище: те саме |
 | `REFRESH_TOKEN_PEPPER` | так | — | HMAC-«перець» для хешів refresh-токенів, ≥ 16 байт | сховище: те саме |
+| `STORAGE_ENDPOINT` | ні | — (порожньо = AWS S3) | адреса S3-сумісного сховища, напр. `http://localhost:9000` (MinIO зі стенда); задана → `forcePathStyle` | `.env` (dev) / env оточення (prod) |
+| `STORAGE_REGION` | ні | `us-east-1` | регіон для підпису SigV4 (MinIO байдуже, AWS потребує регіон бакета) | `.env` (dev) / env оточення (prod) |
+| `STORAGE_ACCESS_KEY` | так | — | ключ доступу до сховища (ДЗ #26) | сховище: локальний `.env` поза git (dev), env оточення платформи (prod); у `.env.example` — дев-користувач MinIO зі стенда, він не секрет |
+| `STORAGE_SECRET_KEY` | так | — | секрет ключа доступу; право читати й писати **всі** файли бакета | сховище: те саме |
+| `STORAGE_BUCKET` | так | — | приватний бакет для завантажень і хешованих публічних ассетів, напр. `marketplace-files`; створює `npm run storage:init` | `.env` (dev) / env оточення (prod) |
 | `PACT_BROKER_URL` | ні | — | адреса Pact Broker для контрактних тестів (`http://127.0.0.1:9292` для compose); застосунок її не використовує, читає лише тестовий код | сховище: локальний `.env` поза git (dev), secrets GitHub (CI) |
 | `PACT_BROKER_TOKEN` | ні | — | bearer-токен брокера; для локального compose-брокера порожній | сховище: локальний `.env` поза git (dev), secrets GitHub (CI) |
 
@@ -166,9 +177,10 @@ docker build -t myapp . && docker run --rm myapp ls -a /app && docker run --rm m
 | `/orders` | `GET /orders` (cursor-пагінація), `POST /orders` (Idempotency-Key), `GET /orders/{id}`, `PATCH /orders/{id}/status` (життєвий цикл), `GET /orders/{id}/events` (SSE) |
 | `/sessions` | `POST /sessions` (сесія в Redis для `sub` токена), `GET /sessions/me` (`X-Session-Id`, читання подовжує TTL) — ДЗ #23 |
 | `/auth` | `POST /auth/login`, `POST /auth/refresh` (ротація з детекцією повтору), `POST /auth/logout` — ДЗ #24; усі операції, крім `/health`, `GET /products*` і `login`/`refresh`, під `bearerAuth` |
+| `/uploads`, `/files` | `POST /uploads/intent` (Idempotency-Key, presigned PUT або multipart-план), `GET /uploads/{id}/parts` (ListParts + URL лише на відсутні частини), `POST /uploads/{id}/commit` (HeadObject, звірка розміру), `GET /files/{id}` → `302` на presigned GET на 60 с — ДЗ #26 |
 
 - **Cursor-пагінація**: `?limit=&cursor=`, відповідь `{ items, next_cursor }`, `next_cursor: null` — сторінок більше немає. Курсор — непрозорий токен.
-- **Idempotency-Key**: обовʼязковий header на обох POST. Той самий ключ + те саме тіло → та сама відповідь `201` + `Idempotency-Replay: true`; той самий ключ + інше тіло → `422`. Ключі живуть у таблиці `idempotency_keys` в одній транзакції з ресурсом (ДЗ #22).
+- **Idempotency-Key**: обовʼязковий header на POST, що створюють ресурс (`/products`, `/orders`, `/uploads/intent`). Той самий ключ + те саме тіло → та сама відповідь `201` + `Idempotency-Replay: true`; той самий ключ + інше тіло → `422`. Ключі живуть у таблиці `idempotency_keys` в одній транзакції з ресурсом (ДЗ #22).
 - **problem+json**: кожна помилка — `application/problem+json` зі схемою `Problem` (`type`, `title`, `status`, `detail`, `instance`).
 - Гроші — цілі копійки (`price_cents`, `total_cents`).
 - **Checkout** (`POST /orders`) — одна транзакція: атомарний декремент `stock` кожного товару, списання
@@ -668,6 +680,7 @@ compose для перших чотирьох команд не потрібен.
 | `outbox.int-spec.ts` | замовлення і рядок outbox одним COMMIT; падіння після вставки в outbox відкочує обидва; ключ ідемпотентності: replay, `422` на інше тіло, пʼять паралельних запитів з одним ключем → одне замовлення, невдалий запит ключа не лишає; relay публікує по порядку і позначає `published_at`; publish, що падає завжди → backoff, після пʼяти спроб подія в DLQ і `failed_at`; падіння relay між publish і UPDATE → подія вдруге, ефект один, inbox з однією позначкою (ДЗ #22) |
 | `redis.int-spec.ts` | 30 одночасних промахів → один виклик loader-а, TTL із джитером, лок не знімає чужий токен, 25 промахів на відсутній id → один виклик і негативний кеш; сесія подовжує TTL на читанні; ліміт спільний для двох екземплярів і точний під 50 паралельними запитами; черга дедуплікує за `jobId` і доводить падучу задачу до `completed` за три спроби (ДЗ #23) |
 | `test/e2e/redis.e2e-spec.ts` | картка товару з кешу з TTL 295–360 с, інвалідація після замовлення; `POST /sessions` → `GET /sessions/me` і будь-який запит із `X-Session-Id` подовжують TTL, `401` на невідомий id; `429` problem+json із `Retry-After` після ліміту, `/health` поза лімітом (ДЗ #23) |
+| `test/e2e/files.e2e-spec.ts` | intent: ключ `uploads/{userId}/{uuid}.png` без слідів `filename`, replay за Idempotency-Key, `400` на тип поза allowlist; commit до байтів → `409`, підмінений ключ у presigned → `403`, PUT байтів → commit `200`, повторний commit `200`; `GET /files/{id}` → `302` і ті самі байти, чужому `403`, без токена `401`; розмір не збігся → `409`; multipart: 2 з 3 частин → `parts` бачить `[1,2]` і дає URL лише на `[3]`, HeadObject до complete — нічого, commit `409`, після третьої частини complete `200` з ETag `-3`; ассети: прямий GET у бакет `403`, edge `MISS` → `HIT` з `immutable`, новий вміст — нове імʼя (ДЗ #26) |
 | `test/e2e/auth.e2e-spec.ts` | логін ES256 (`kid`, `alg`), `401` на пароль/без токена/зіпсований; keyring із двох `kid`: токен другого ключа проходить, невідомий `kid` — `401`; логаут як дві дії (`access_denylist` + сімʼя); повторне використання refresh валить сімʼю разом із чесним клієнтом; `401` ≠ `403` на власності, ролі, чужому `user_id`/`seller_id` і підробленому payload; список замовлень лише своїх, адмін бачить усі (ДЗ #24) |
 | `test/e2e/orders.e2e-spec.ts` | створити товар → оформити замовлення → прочитати обидва → повтор з тим самим `Idempotency-Key`; `400` без ключа, `404` на невідоме замовлення, `409` при нестачі товару, `422` на той самий ключ з іншим тілом; relay усередині API виносить `order.placed` рівно один раз, повтор за ключем — не публікує (ДЗ #19, #22) |
 | `test/e2e/realtime.e2e-spec.ts` | життєвий цикл статусів і `409`; SSE: `Last-Event-ID`, `400`/`403`/`404` для не-власника, нумерація після рестарту; WS: кімнати, `forbidden`/`unauthenticated` (ДЗ #18) |
@@ -745,7 +758,7 @@ curl -s "$PACT_BROKER_URL/can-i-deploy?pacticipant=marketplace-web&version=$VERS
 
 ### CI
 
-`.github/workflows/ci.yml`: job `db` — compose-стенд (Postgres, PgBouncer, RabbitMQ, два Redis), одноразова
+`.github/workflows/ci.yml`: job `db` — compose-стенд (Postgres, PgBouncer, RabbitMQ, два Redis, MinIO), одноразова
 ES256-пара для прогону (`scripts/jwt-keys.mjs` → `$GITHUB_ENV`; справжній ключ — у сховищі), міграції, демо
 ДЗ #14, #19, #22, #23 і #24, бекап і drill; job `tests` — `test:integration` і `test:e2e`; job `contract` — pipeline контракту,
 де кожен тег ставить крок деплою, а не крок перевірки:
@@ -1579,6 +1592,165 @@ tampered=401
 - ReBAC-кортежі (бонус) не робилися.
 
 
+## Файли
+
+Файли (фото товарів, аватарки, дампи з ДЗ #15) живуть не на диску інстанса, а в S3-сумісному обʼєктному
+сховищі: локально — MinIO зі стенда, у проді — S3 або R2, змінюється лише `STORAGE_ENDPOINT`. API стоїть у
+шляху **авторизації**, але не в шляху **даних**: байти йдуть із клієнта прямо в сховище за presigned URL і зі
+сховища — через кеш-шар. Три властивості, які це доводять, — три демо: `demo:upload` (байти доїжджають, коли
+API вимкнено), `demo:multipart` (після обриву доливається лише відсутня частина), `demo:cdn` (бакет закритий,
+оновлення — під новим URL, інвалідацій нуль).
+
+### Змінні
+
+| Змінна | Джерело | Навіщо | Формат |
+| --- | --- | --- | --- |
+| `STORAGE_ENDPOINT` | `.env` (dev) / env оточення (prod) | адреса емулятора; порожньо означає AWS S3 | `http://localhost:9000` |
+| `STORAGE_REGION` | `.env` / env оточення | регіон для SigV4 | `us-east-1` |
+| `STORAGE_ACCESS_KEY` | сховище секретів (#11): локальний `.env` поза git, env платформи у проді | ключ доступу | рядок |
+| `STORAGE_SECRET_KEY` | сховище секретів (#11) | секрет ключа — право читати й писати всі файли | рядок |
+| `STORAGE_BUCKET` | `.env` / env оточення | приватний бакет для `uploads/` і `assets/` | `marketplace-files` |
+
+Клієнт (`src/files/storage.ts`) — `S3Client` з `forcePathStyle`, коли заданий endpoint (емуляторам потрібно),
+і `requestChecksumCalculation: 'WHEN_REQUIRED'`: SDK кінця 2024 рахує CRC32 для кожного завантаження за
+замовчуванням, а presigned підписується, коли тіла ще немає — у query поїхала б сума порожніх даних. Дев-ключ
+MinIO зі стенда (`marketplace` / `marketplace_dev`) не секрет, він і так у `docker-compose.yml`; продові ключі
+їдуть зі сховища, як `DB_PASSWORD_FILE` і `JWT_PRIVATE_KEY`. Ціна витоку інша, ніж у `DATABASE_URL`: ключ
+сховища — доступ до всіх файлів усіх користувачів, тому три демо йдуть через `scripts/with-secrets.sh dev`,
+а в репозиторії жодного `.env` зі значеннями немає (критерії 2 і 6).
+
+### Двокроковий контракт завантаження
+
+`POST /uploads/intent` → клієнт кладе байти напряму у сховище → `POST /uploads/{id}/commit`
+(`src/files/files.service.ts`).
+
+- **intent** працює під `AuthGuard` з ДЗ #24, валідує `content_type` за allowlist (`image/jpeg`, `image/png`,
+  `image/webp`, `application/pdf`, `application/octet-stream` — і в OpenAPI, і в коді) і сам генерує ключ
+  `uploads/{userId}/{uuid}.{ext}`: розширення береться з allowlist за типом, `filename` клієнта нікуди не
+  потрапляє — інакше клієнт отримав би право писати за довільним шляхом у бакеті (демо надсилає
+  `../../etc/passwd` і перевіряє, що в ключі його немає). У базі зʼявляється рядок `files` зі статусом `pending`
+  (міграція `Files`: `id, key UNIQUE, owner_id, content_type, size, status, upload_id, etag, created_at,
+  completed_at`, частковий індекс по `created_at WHERE status = 'pending'` для чистки). Заголовок
+  `Idempotency-Key` обовʼязковий (ДЗ #22): подвійний тап по «завантажити» повертає той самий `file_id` і ті самі
+  URL з `Idempotency-Replay: true`, а не резервує другий обʼєкт; у відбиток ключа входить і власник, тож чужий
+  замовник з тим самим ключем отримує `422`, а не чужий intent.
+- **commit** робить `HeadObject` і звіряє, що обʼєкт існує і що розмір збігається з заявленим в intent; лише
+  тоді `status = completed`, `etag` з відповіді сховища. Без цього клієнт «закомітив» би те, чого не заливав, —
+  у демо це `commit-without-bytes=409`. Для multipart commit спершу перевіряє, що частин рівно стільки, скільки
+  порахував план, і робить `CompleteMultipartUpload`; завершити «половину» не можна — `409`.
+- **віддача** приватного файла — `GET /files/{id}` → `302` на presigned GET. Presigned не можна відкликати (ні
+  `jti`, ні реєстру — з чотирьох стратегій ДЗ #24 працює лише короткий строк), тому в лист чи в UI іде не URL,
+  а посилання на наш ендпоїнт: гард перевіряє власника на кожен запит, URL живе хвилину. У лог іде `file_id` і
+  ключ обʼєкта, presigned URL — ніколи: рядок у access-лозі балансувальника дорівнював би виданому доступу.
+
+### Строк presigned
+
+`PUT_URL_TTL_S = 300`, `GET_URL_TTL_S = 60` (`src/files/upload-policy.ts`). Сценарій PUT — аватарка або фото
+товару з форми: клієнт отримує URL і одразу вантажить; пʼять хвилин покривають повільну мобільну мережу й
+повторну спробу після обриву, але URL із перехопленого запиту не живе годинами. Для multipart ті самі 300 с на
+кожну частину — довгий файл не потребує довгого URL, бо клієнт просить свіжі URL на відсутні частини через
+`GET /uploads/{id}/parts`. GET — 60 с: він видається у відповідь на запит, який уже пройшов гард, і клієнт іде за
+ним негайно. Технічна межа SigV4 — 7 діб, але presigned помирає разом із креденшелами, якими підписаний: прод
+ходить у сховище під роллю зі строком STS близько години, тож «7 днів» у проді й так дасть URL на годину. Що
+протермінований URL дає `403`, демо перевіряє окремо (`expired=403`: підпис на 1 с, пауза 2,5 с); підпис накриває
+шлях — підмінений ключ у тому ж URL дає `403 SignatureDoesNotMatch` (`tampered=403`).
+
+### Multipart із довантаженням
+
+Поріг і розмір частини пораховані, не вписані (`src/files/upload-policy.ts`): частин максимум 10 000, мінімум
+5 МіБ на всі частини, крім останньої (інакше `EntityTooSmall`), тож
+`partSize = max(5 МіБ, ceil(size / 10 000))`, округлений угору до МіБ, — файл на 100 ГБ отримує частини по
+11 МіБ, а бібліотека з жорсткими 5 МіБ впала б уже на 50 ГБ. Поріг — `2 × 5 МіБ = 10 МіБ`: усе, що більше,
+має щонайменше дві частини, інакше multipart вироджується в один PUT із трьома зайвими запитами. Для таких
+файлів intent робить `CreateMultipartUpload` і підписує URL на кожну частину. Головне — відновлення: новий
+процес викликає `GET /uploads/{id}/parts`, сервер питає сховище `ListParts` і повертає URL **лише** на частини,
+яких бракує. Демо ріже 11 МіБ на 5 + 5 + 1, роняє клієнта `SIGKILL` після двох частин, і другий процес доливає
+одну (`resumed-parts=1`); до Complete обʼєкта не існує (`HeadObject → 404`), хоча частини вже лежать; після —
+розмір збігається, а ETag має суфікс `-3` і не є MD5 файла (`etag-is-md5=0`), тому код «порівняю ETag із
+локальним MD5» на multipart ламався б мовчки.
+
+### CDN перед сховищем, сховище закрите
+
+Обрана форма — **локальний edge** (`src/files/edge.ts`, `npm run edge`): кілька десятків рядків `node:http`,
+які беруть обʼєкт зі сховища власними креденшелами SDK, кладуть у памʼять і віддають із `X-Cache: HIT|MISS`.
+Це і є суть OAC: до бакета ходить кеш, а не публіка. Бакет приватний (MinIO за замовчуванням: анонімний GET —
+`403 AccessDenied`, `direct=403`), кеш читається анонімно. Edge кешує лише те, що origin дозволив кешувати:
+без `Cache-Control` з `max-age` обʼєкт віддається, але не запамʼятовується — тому заголовок ставиться на
+обʼєкт при завантаженні (`publishAsset`), а не в edge.
+
+Справжня форма — CloudFront + Origin Access Control. Bucket policy для AWS-варіанту (Block Public Access
+увімкнено, читати може лише сервіс CloudFront, і лише з **нашої** дистрибуції — без `Condition` з
+`AWS:SourceArn` доступ мала б будь-яка дистрибуція у світі):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowOnlyOurCloudFrontDistribution",
+      "Effect": "Allow",
+      "Principal": { "Service": "cloudfront.amazonaws.com" },
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::marketplace-files/assets/*",
+      "Condition": {
+        "StringEquals": {
+          "AWS:SourceArn": "arn:aws:cloudfront::123456789012:distribution/E2EXAMPLE1234"
+        }
+      }
+    }
+  ]
+}
+```
+
+Поведінка дистрибуції: origin — бакет із OAC (SigV4), behavior лише на `/assets/*`, cache policy шанує
+`Cache-Control` origin-у, `uploads/` через CDN не роздається взагалі — приватні файли ідуть через
+`GET /files/{id}`. Для приватного контенту через CDN планом є signed URL / signed cookies CloudFront — той самий
+прийом «короткий строк замість відкликання», лише підпис ключем дистрибуції, а не бакета.
+
+### Оновлення без інвалідації
+
+Імʼя публічного ассета містить хеш вмісту: `assets/app.7321d6cd.css` (`assetKey` — перші 8 hex SHA-256 вмісту),
+заголовок `Cache-Control: public, max-age=31536000, immutable`. «Деплой» нового вмісту — новий обʼєкт під новим
+URL; старий запис у кеші нікому не заважає і доживає свій рік, інвалідацій — нуль (`new-name=1`,
+`content-changed=1`, `old-url-still-hit=1`). AWS каже прямо: для файлів, що часто оновлюються, передусім
+версіонування імен, а не інвалідація — інвалідація платна, повільна і не гарантує, що проміжні кеші й браузери
+її побачили.
+
+### Гігієна бакета
+
+- **Незавершені multipart тарифікуються**, хоча обʼєкта немає: `npm run storage:init` разом із бакетом ставить
+  lifecycle-правило `AbortIncompleteMultipartUpload: 7 днів`. MinIO цієї версії приймає правило лише у парі з
+  дією `Expiration`, тому поруч стоїть безвідносний для неверсійного бакета `ExpiredObjectDeleteMarker: true`;
+  на AWS та сама конфігурація валідна. Правило «видалити все старше N днів» таких хвостів не чіпає — це різні
+  дії.
+- **Файли-сироти**: intent без commit лишає рядок `pending` і, можливо, обʼєкт. `npm run prune` (ДЗ #22)
+  добиває `pending` старші за добу: `AbortMultipartUpload` → `DeleteObject` → `DELETE` рядка
+  (`src/files/abandoned.ts`), індекс `idx_files_pending_created_at` робить вибірку дешевою.
+- **Список файлів живе в базі**, не у сховищі: листинг платний і по 1 000 ключів, демо чистять лише свій префікс.
+- **Борг ДЗ #15**: бекап досі лягає в локальну теку; наступний крок — `uploads/`-подібний префікс `backups/` з
+  lifecycle у холодний клас. Дві речі чесно: Glacier ламає RTO (обʼєкт треба спершу відновити), і lifecycle не
+  робить бекап перевіреним — `restore-drill` нікуди не дівається.
+
+### Демо
+
+`npm run demo:upload`, `npm run demo:multipart`, `npm run demo:cdn` — кожне саме приводить стан до чистого
+(свій користувач, свій префікс, `ListMultipartUploads → AbortMultipartUpload`, видалення своїх обʼєктів і рядків),
+друкує `ключ=число` і завершується з кодом ≠ 0, якщо інваріант порушено. У `demo:upload` API піднімається в
+процесі демо (`src/redis/demo-api.ts`), зупиняється перед PUT — живість порту перевіряється сирим сокетом
+`net.connect`, не `fetch`, — PUT робить дочірній `node` з **порожнім** оточенням (жодного ключа), після чого API
+піднімається знову на іншому порту (пул `fetch` тримає зʼєднання на парі host:port). Числа трьох прогонів
+(локальний стенд і два прогони на чистій збірці) збігаються:
+
+| Демо | Вивід |
+| --- | --- |
+| `demo:upload` | `intent=200 intent-replay=1 key-from-server=1 api-alive=0 put-offline=200 commit=200 size-match=1 commit-without-bytes=409 tampered=403 expired=403 download=302 download-bytes-match=1` |
+| `demo:multipart` | `stale-uploads-aborted=0 intent=200 part-size=5242880 parts-planned=3 crash-signal=1 parts-after-crash=2 head-before-complete=404 resumed-parts=1 complete=200 size-match=1 etag-multipart=1 etag-is-md5=0` |
+| `demo:cdn` | `direct=403 edge-miss=200 edge-hit=200 cache-hit=1 immutable-cache-control=1 new-name=1 new-url=200 content-changed=1 old-url-still-hit=1 invalidations=0` |
+
+Формула одна на всі три механізми: коли скасувати дію дорого або неможливо, зроби так, щоб скасування було не
+потрібне. Presigned не відкликається — тому короткий. Запис у CDN не дістати — тому URL версійний. Обрив не
+попередити — тому завантаження відновлюване.
+
 ## Grading
 
 ```bash
@@ -1587,6 +1759,10 @@ export DB_HOST=127.0.0.1 DB_PORT=6432 DB_USER=marketplace_a DB_PASSWORD=marketpl
 export BROKER_URL=amqp://marketplace:marketplace_dev@127.0.0.1:5672
 export REDIS_URL=redis://127.0.0.1:6379
 export REDIS_QUEUE_URL=redis://127.0.0.1:6382
+export STORAGE_ENDPOINT=http://127.0.0.1:9000
+export STORAGE_ACCESS_KEY=marketplace
+export STORAGE_SECRET_KEY=marketplace_dev
+export STORAGE_BUCKET=marketplace-files
 export SKIP_VAULT=1
 # те самі база і роль для застосунку (npm run start / start:vault): URL без облікових даних + файл user:password
 export DB_URL=postgres://127.0.0.1:6432/marketplace DB_PASSWORD_FILE=secrets/db_password.example
@@ -1602,7 +1778,7 @@ export JWT_KID=grader
 export JWT_PRIVATE_KEY="$(cat /tmp/priv.b64)"
 export JWT_PUBLIC_KEYS="grader:$(cat /tmp/pub.b64)"
 export REFRESH_TOKEN_PEPPER=grader-pepper-0123456789abcdef
-npm ci && npm run build && npm run migrate && npm run events:topology
+npm ci && npm run build && npm run migrate && npm run events:topology && npm run storage:init
 bash scripts/with-secrets.sh dev bash scripts/backup.sh
 bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
 ```
@@ -1663,6 +1839,15 @@ URL) не потребують ні стенда, ні сховища.
 грейдеру не потрібен — застосунку байдуже, чия пара, аби валідна, тому блок генерує одноразову ES256-пару на
 місці; `REFRESH_TOKEN_PEPPER` — будь-який рядок від 16 байт. Голий `npm run start` без цих змінних падає з
 exit 1 і називає їх (критерій 3), `npm run start:vault` бере їх зі сховища.
+
+ДЗ #26 (ті самі `export`; `seed` не потрібен): `npm run demo:upload`, `npm run demo:multipart`, `npm run demo:cdn`.
+`STORAGE_*` — MinIO зі стенда (`minio`, API на порту `9000`, консоль на `9001`, користувач `marketplace` /
+`marketplace_dev` з compose; пароль можна задати змінною `STORAGE_PASSWORD` при першому `docker compose up`).
+Бакет створює `npm run storage:init` з блоку вище; демо на старті перевіряють його самі, тож і без цього кроку
+проходять. `demo:upload` і `demo:multipart` піднімають API всередині демо, тому їм потрібні `DB_*`, `BROKER_URL`,
+`REDIS_*` і ключі JWT з блоку вище; `demo:cdn` потребує лише `STORAGE_*`. Тип файла для multipart у демо —
+`application/octet-stream` на 11 МіБ, тому серія не навантажує диск емулятора; дані MinIO лежать у томі
+`miniodata`.
 
 ## Перевірки
 

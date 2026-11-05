@@ -10,6 +10,7 @@ export default async function globalTeardown() {
         container: StartedPostgreSqlContainer;
         broker: StartedRabbitMQContainer;
         redis: StartedTestContainer;
+        minio: StartedTestContainer;
         secretDir: string;
       };
     }
@@ -19,6 +20,7 @@ export default async function globalTeardown() {
     state.container.stop(),
     state.broker.stop(),
     state.redis.stop(),
+    state.minio.stop(),
   ]);
   rmSync(state.secretDir, { recursive: true, force: true });
 }

@@ -47,6 +47,19 @@ export const publicKeyringSchema = z
     return keyring;
   });
 
+export const storageSchema = z.object({
+  STORAGE_ENDPOINT: z.preprocess(
+    (value) => (value === '' ? undefined : value),
+    z.url({ protocol: /^https?$/ }).optional(),
+  ),
+  STORAGE_REGION: z.string().min(1).default('us-east-1'),
+  STORAGE_ACCESS_KEY: z.string().min(1),
+  STORAGE_SECRET_KEY: z.string().min(1),
+  STORAGE_BUCKET: z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/),
+});
+
+export type StorageEnv = z.infer<typeof storageSchema>;
+
 export const envSchema = z
   .object({
     NODE_ENV: z
@@ -69,6 +82,7 @@ export const envSchema = z
     JWT_PRIVATE_KEY: pemBase64(createPrivateKey, 'private key'),
     JWT_PUBLIC_KEYS: publicKeyringSchema,
     REFRESH_TOKEN_PEPPER: z.string().min(16),
+    ...storageSchema.shape,
     PACT_BROKER_URL: z.string().url().optional(),
     PACT_BROKER_TOKEN: z.string().optional(),
   })
@@ -100,6 +114,16 @@ export function parseBrokerUrl(env: NodeJS.ProcessEnv): string {
   if (!result.success) {
     throw new Error(
       `Invalid BROKER_URL: ${result.error.issues.map((issue) => issue.message).join(', ')}`,
+    );
+  }
+  return result.data;
+}
+
+export function parseStorageEnv(env: NodeJS.ProcessEnv): StorageEnv {
+  const result = storageSchema.safeParse(env);
+  if (!result.success) {
+    throw new Error(
+      `Invalid storage environment:\n${result.error.issues.map((issue) => `  - ${issue.path.join('.')}: ${issue.message}`).join('\n')}`,
     );
   }
   return result.data;
