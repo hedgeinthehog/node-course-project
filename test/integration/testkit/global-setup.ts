@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from 'node:crypto';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -50,6 +51,20 @@ export default async function globalSetup() {
   process.env.BROKER_URL = broker.getAmqpUrl();
   process.env.REDIS_URL = `redis://${redis.getHost()}:${redis.getMappedPort(6379)}`;
   process.env.REDIS_QUEUE_URL = process.env.REDIS_URL;
+  const b64 = (pem: string) => Buffer.from(pem).toString('base64');
+  const keyPair = () =>
+    generateKeyPairSync('ec', {
+      namedCurve: 'P-256',
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+    });
+  const keys = keyPair();
+  const previous = keyPair();
+  process.env.JWT_KID = 'test';
+  process.env.JWT_PRIVATE_KEY = b64(keys.privateKey);
+  process.env.JWT_PUBLIC_KEYS = `test:${b64(keys.publicKey)},previous:${b64(previous.publicKey)}`;
+  process.env.TEST_PREVIOUS_JWT_PRIVATE_KEY = b64(previous.privateKey);
+  process.env.REFRESH_TOKEN_PEPPER = 'test-pepper-0123456789abcdef';
   Object.assign(globalThis, {
     __TEST_DATABASE__: { container, broker, redis, secretDir },
   });

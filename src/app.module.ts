@@ -10,12 +10,14 @@ import { ProductsModule } from './products/products.module';
 import { OrdersModule } from './orders/orders.module';
 import { HealthModule } from './health/health.module';
 import { ProblemFilter } from './common/problem.filter';
+import { AuthModule } from './auth/auth.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, validate }),
     DbModule,
     RedisModule,
+    AuthModule,
     EventsModule,
     ProductsModule,
     SessionsModule,

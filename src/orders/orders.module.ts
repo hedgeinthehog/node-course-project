@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { OrderEvent } from '../entities/order-event.entity';
+import { AuthModule } from '../auth/auth.module';
 import { RedisModule } from '../redis/redis.module';
 import { Order } from '../entities/order.entity';
 import { OrdersService } from './orders.service';
@@ -10,7 +11,11 @@ import { OrdersGateway } from './orders.gateway';
 import { OrderOwnerGuard } from './order-owner.guard';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Order, OrderEvent]), RedisModule],
+  imports: [
+    TypeOrmModule.forFeature([Order, OrderEvent]),
+    RedisModule,
+    AuthModule,
+  ],
   controllers: [OrdersController],
   providers: [
     OrdersService,

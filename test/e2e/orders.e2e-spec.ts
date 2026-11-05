@@ -6,6 +6,7 @@ import { DataSource } from 'typeorm';
 import { ORDER_PLACED_QUEUE } from '../../src/events/topology';
 import { given } from '../integration/testkit/builders';
 import { resetDatabase } from '../integration/testkit/database';
+import { bearer } from './auth-helpers';
 import { createApp } from './create-app';
 
 describe('orders API (e2e)', () => {
@@ -32,11 +33,14 @@ describe('orders API (e2e)', () => {
 
   it('creates a product, places an order and reads both back', async () => {
     const { user } = given(dataSource);
-    const seller = await user();
+    const seller = await user({ role: 'seller' });
     const buyer = await user({ balanceCents: '100000' });
+    const asSeller = await bearer(app, seller);
+    const asBuyer = await bearer(app, buyer);
 
     const product = await api()
       .post('/products')
+      .set(asSeller)
       .set('Idempotency-Key', 'product-1')
       .send({
         seller_id: Number(seller.id),
@@ -58,6 +62,7 @@ describe('orders API (e2e)', () => {
     };
     const placed = await api()
       .post('/orders')
+      .set(asBuyer)
       .set('Idempotency-Key', 'order-1')
       .send(orderRequest)
       .expect(201);
@@ -68,7 +73,10 @@ describe('orders API (e2e)', () => {
       status: 'paid',
     });
 
-    const fetched = await api().get(`/orders/${placed.body.id}`).expect(200);
+    const fetched = await api()
+      .get(`/orders/${placed.body.id}`)
+      .set(asBuyer)
+      .expect(200);
     expect(fetched.body).toEqual(placed.body);
 
     const stock = await api().get(`/products/${product.body.id}`).expect(200);
@@ -76,12 +84,13 @@ describe('orders API (e2e)', () => {
 
     const replay = await api()
       .post('/orders')
+      .set(asBuyer)
       .set('Idempotency-Key', 'order-1')
       .send(orderRequest)
       .expect(201);
     expect(replay.headers['idempotency-replay']).toBe('true');
     expect(replay.body).toEqual(placed.body);
-    const list = await api().get('/orders').expect(200);
+    const list = await api().get('/orders').set(asBuyer).expect(200);
     expect(list.body.items).toHaveLength(1);
   });
 
@@ -103,7 +112,9 @@ describe('orders API (e2e)', () => {
   });
 
   it('returns 404 problem+json for an order that does not exist', async () => {
-    const response = await api().get('/orders/424242').expect(404);
+    const buyer = await given(dataSource).user();
+    const asBuyer = await bearer(app, buyer);
+    const response = await api().get('/orders/424242').set(asBuyer).expect(404);
 
     expect(response.headers['content-type']).toContain(
       'application/problem+json',
@@ -118,9 +129,11 @@ describe('orders API (e2e)', () => {
     const { user, product } = given(dataSource);
     const buyer = await user();
     const lamp = await product({ stock: 1 });
+    const asBuyer = await bearer(app, buyer);
 
     const response = await api()
       .post('/orders')
+      .set(asBuyer)
       .set('Idempotency-Key', 'order-2')
       .send({
         user_id: Number(buyer.id),
@@ -137,6 +150,7 @@ describe('orders API (e2e)', () => {
     const { user, product } = given(dataSource);
     const buyer = await user();
     const keyboard = await product({ priceCents: 12_000, stock: 5 });
+    const asBuyer = await bearer(app, buyer);
     const orderRequest = {
       user_id: Number(buyer.id),
       items: [{ product_id: Number(keyboard.id), quantity: 2 }],
@@ -144,11 +158,13 @@ describe('orders API (e2e)', () => {
 
     const placed = await api()
       .post('/orders')
+      .set(asBuyer)
       .set('Idempotency-Key', 'order-3')
       .send(orderRequest)
       .expect(201);
     await api()
       .post('/orders')
+      .set(asBuyer)
       .set('Idempotency-Key', 'order-3')
       .send(orderRequest)
       .expect(201);
@@ -182,6 +198,7 @@ describe('orders API (e2e)', () => {
     const { user, product } = given(dataSource);
     const buyer = await user();
     const lamp = await product({ stock: 5 });
+    const asBuyer = await bearer(app, buyer);
     const body = (quantity: number) => ({
       user_id: Number(buyer.id),
       items: [{ product_id: Number(lamp.id), quantity }],
@@ -189,11 +206,13 @@ describe('orders API (e2e)', () => {
 
     await api()
       .post('/orders')
+      .set(asBuyer)
       .set('Idempotency-Key', 'order-4')
       .send(body(1))
       .expect(201);
     const response = await api()
       .post('/orders')
+      .set(asBuyer)
       .set('Idempotency-Key', 'order-4')
       .send(body(2))
       .expect(422);
@@ -206,7 +225,7 @@ describe('orders API (e2e)', () => {
       title: 'Unprocessable Entity',
       detail: 'Idempotency-Key was already used with a different request body',
     });
-    const list = await api().get('/orders').expect(200);
+    const list = await api().get('/orders').set(asBuyer).expect(200);
     expect(list.body.items).toHaveLength(1);
   });
 });

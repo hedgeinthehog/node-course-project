@@ -1,6 +1,11 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, MoreThan, Repository } from 'typeorm';
+import type { Principal } from '../auth/auth.service';
 import { IdempotencyStore } from '../common/idempotency';
 import { buildPage, decodeCursor, Page } from '../common/pagination';
 import { Product } from '../entities/product.entity';
@@ -28,7 +33,12 @@ export class ProductsService {
     this.idempotency = new IdempotencyStore(dataSource);
   }
 
-  create(key: string, dto: CreateProductDto) {
+  create(key: string, dto: CreateProductDto, actor: Principal) {
+    if (actor.role !== 'admin' && String(dto.seller_id) !== actor.id) {
+      throw new ForbiddenException(
+        `seller ${actor.id} cannot create products for seller ${dto.seller_id}`,
+      );
+    }
     return this.idempotency.run(key, dto, async (manager) => {
       const sellerId = String(dto.seller_id);
       if (!(await manager.existsBy(User, { id: sellerId }))) {

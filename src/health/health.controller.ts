@@ -1,7 +1,9 @@
 import { Controller, Get, ServiceUnavailableException } from '@nestjs/common';
+import { Public } from '../auth/decorators';
 import { DataSource } from 'typeorm';
 
 @Controller('health')
+@Public()
 export class HealthController {
   constructor(private readonly dataSource: DataSource) {}
 

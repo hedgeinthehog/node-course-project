@@ -1,15 +1,13 @@
 import {
-  Body,
   Controller,
   Get,
-  NotFoundException,
   Post,
   Req,
   UnauthorizedException,
 } from '@nestjs/common';
 import type { Request } from 'express';
-import { DataSource } from 'typeorm';
-import { User } from '../entities/user.entity';
+import type { Principal } from '../auth/auth.service';
+import { CurrentUser, Public } from '../auth/decorators';
 import { Session, SessionStore } from '../redis/session.store';
 
 export interface SessionDto {
@@ -26,20 +24,14 @@ const toSessionDto = (session: Session): SessionDto => ({
 
 @Controller('sessions')
 export class SessionsController {
-  constructor(
-    private readonly sessions: SessionStore,
-    private readonly dataSource: DataSource,
-  ) {}
+  constructor(private readonly sessions: SessionStore) {}
 
   @Post()
-  async create(@Body() dto: { user_id: number }): Promise<SessionDto> {
-    const exists = await this.dataSource
-      .getRepository(User)
-      .existsBy({ id: String(dto.user_id) });
-    if (!exists) throw new NotFoundException(`User ${dto.user_id} not found`);
-    return toSessionDto(await this.sessions.create(dto.user_id));
+  async create(@CurrentUser() user: Principal): Promise<SessionDto> {
+    return toSessionDto(await this.sessions.create(Number(user.id)));
   }
 
+  @Public()
   @Get('me')
   me(@Req() request: Request & { session?: Session | null }): SessionDto {
     if (!request.session) {

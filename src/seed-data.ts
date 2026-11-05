@@ -1,4 +1,5 @@
 import { DataSource } from 'typeorm';
+import { hashPassword } from './auth/password';
 import { OrderItem } from './entities/order-item.entity';
 import { Order } from './entities/order.entity';
 import { Product } from './entities/product.entity';
@@ -20,13 +21,19 @@ const PRODUCT_NAMES = [
 ];
 const STATUSES = ['paid', 'paid', 'paid', 'pending', 'cancelled'] as const;
 
+export const SEED_PASSWORD = 'password';
+const SEED_ROLES = ['admin', 'seller', 'seller'] as const;
+
 export async function seedDatabase(dataSource: DataSource) {
+  const passwordHash = await hashPassword(SEED_PASSWORD);
   await dataSource.transaction(async (manager) => {
     const users = Array.from({ length: 10 }, (_, i) => ({
       id: String(i + 1),
       email: `seed.user${i + 1}@example.com`,
       name: `Користувач ${i + 1}`,
       balanceCents: '100000000',
+      role: SEED_ROLES[i] ?? ('buyer' as const),
+      passwordHash,
     }));
     await manager.upsert(User, users, ['id']);
 

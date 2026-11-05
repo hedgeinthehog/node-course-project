@@ -11,6 +11,8 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import type { Response } from 'express';
+import type { Principal } from '../auth/auth.service';
+import { CurrentUser, Roles } from '../auth/decorators';
 import { OrdersService } from './orders.service';
 import type { CreateOrderDto } from './dto/create-order.dto';
 import type { ChangeOrderStatusDto } from './dto/change-order-status.dto';
@@ -29,8 +31,13 @@ export class OrdersController {
     @Headers('idempotency-key') key: string,
     @Body() dto: CreateOrderDto,
     @Res({ passthrough: true }) res: Response,
+    @CurrentUser() user: Principal,
   ) {
-    const { result, replayed } = await this.ordersService.create(key, dto);
+    const { result, replayed } = await this.ordersService.create(
+      key,
+      dto,
+      user,
+    );
     if (replayed) {
       res.setHeader('Idempotency-Replay', 'true');
     }
@@ -38,15 +45,20 @@ export class OrdersController {
   }
 
   @Get()
-  findAll(@Query('limit') limit = 20, @Query('cursor') cursor?: string) {
-    return this.ordersService.findAll(Number(limit), cursor);
+  findAll(
+    @CurrentUser() user: Principal,
+    @Query('limit') limit = 20,
+    @Query('cursor') cursor?: string,
+  ) {
+    return this.ordersService.findAll(Number(limit), cursor, user);
   }
 
   @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.ordersService.findOne(id);
+  findOne(@Param('id') id: string, @CurrentUser() user: Principal) {
+    return this.ordersService.findOne(id, user);
   }
 
+  @Roles('admin')
   @Patch(':id/status')
   changeStatus(@Param('id') id: string, @Body() dto: ChangeOrderStatusDto) {
     return this.ordersService.changeStatus(id, dto.status);
