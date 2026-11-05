@@ -14,7 +14,7 @@ import { Storage } from '../../../src/files/storage';
 const POSTGRES_IMAGE = 'postgres:16-alpine';
 const RABBITMQ_IMAGE = 'rabbitmq:4.2-alpine';
 const REDIS_IMAGE = 'redis:8-alpine';
-const MINIO_IMAGE = 'minio/minio:RELEASE.2025-09-07T16-13-09Z';
+const MINIO_IMAGE = 'bitnamilegacy/minio:2025.7.23-debian-12-r5';
 
 export default async function globalSetup() {
   const [container, broker, redis, minio] = await Promise.all([
@@ -29,7 +29,6 @@ export default async function globalSetup() {
         MINIO_ROOT_USER: 'test',
         MINIO_ROOT_PASSWORD: 'test-secret-1',
       })
-      .withCommand(['server', '/data'])
       .withExposedPorts(9000)
       .withWaitStrategy(Wait.forHttp('/minio/health/live', 9000))
       .start(),

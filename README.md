@@ -1843,6 +1843,9 @@ exit 1 і називає їх (критерій 3), `npm run start:vault` бер
 ДЗ #26 (ті самі `export`; `seed` не потрібен): `npm run demo:upload`, `npm run demo:multipart`, `npm run demo:cdn`.
 `STORAGE_*` — MinIO зі стенда (`minio`, API на порту `9000`, консоль на `9001`, користувач `marketplace` /
 `marketplace_dev` з compose; пароль можна задати змінною `STORAGE_PASSWORD` при першому `docker compose up`).
+Образ — `bitnamilegacy/minio:2025.7.23-debian-12-r5` (MinIO RELEASE.2025-07-23): власний репозиторій `minio/minio`
+на Docker Hub і quay.io восени 2026 перестав віддавати образи (`pull access denied`), а заморожений образ Bitnami
+лишається публічним і мультиарх (amd64/arm64); сервер той самий, тому поведінка demo не змінюється.
 Бакет створює `npm run storage:init` з блоку вище; демо на старті перевіряють його самі, тож і без цього кроку
 проходять. `demo:upload` і `demo:multipart` піднімають API всередині демо, тому їм потрібні `DB_*`, `BROKER_URL`,
 `REDIS_*` і ключі JWT з блоку вище; `demo:cdn` потребує лише `STORAGE_*`. Тип файла для multipart у демо —
