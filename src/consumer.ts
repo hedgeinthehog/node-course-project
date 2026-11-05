@@ -4,7 +4,7 @@ import { parseBrokerUrl, parseRedisUrls } from './config/env.schema';
 import { dataSourceOptions } from './data-source';
 import { ConsumerSignal, PREFETCH, startConsumer } from './events/consumer';
 import { ORDER_PLACED_QUEUE, RETRY_DELAY_MS } from './events/topology';
-import { createQueue, JOBS } from './queue/queue';
+import { createQueue, enqueue, JOBS } from './queue/queue';
 
 const tag = `consumer ${process.pid}`;
 const crashAfterEffect = process.env.CONSUMER_CRASH_AFTER_EFFECT === '1';
@@ -48,7 +48,8 @@ async function main() {
   const consumer = await startConsumer(connection, dataSource, {
     observe: report,
     afterEffect: async (event) => {
-      await jobs.add(
+      await enqueue(
+        jobs,
         JOBS.confirmation,
         { orderId: event.payload.orderId, eventId: event.eventId },
         { jobId: event.eventId },

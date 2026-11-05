@@ -19,7 +19,7 @@ export const SCHEDULERS = [
   { id: 'catalog-refresh', every: 60_000, name: JOBS.refresh },
 ] as const;
 
-export function connectionFor(url: string) {
+export function connectionFor(url: string, role: 'queue' | 'worker') {
   const parsed = new URL(url);
   return {
     host: parsed.hostname,
@@ -28,13 +28,50 @@ export function connectionFor(url: string) {
     password: parsed.password || undefined,
     db: Number(parsed.pathname.slice(1)) || 0,
     tls: parsed.protocol === 'rediss:' ? {} : undefined,
-    maxRetriesPerRequest: null,
+    ...(role === 'worker'
+      ? { maxRetriesPerRequest: null }
+      : {
+          maxRetriesPerRequest: 1,
+          enableOfflineQueue: false,
+          connectTimeout: 1000,
+          retryStrategy: (times: number) => Math.min(times * 200, 2000),
+        }),
   };
+}
+
+export const ENQUEUE_TIMEOUT_MS = 2000;
+
+export async function enqueue(
+  queue: Queue,
+  name: string,
+  data: Record<string, unknown>,
+  options: JobsOptions = {},
+  timeoutMs = ENQUEUE_TIMEOUT_MS,
+): Promise<Job> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      queue.add(name, data, options),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(
+                `queue.add ${name} timed out after ${timeoutMs} ms, is Redis up?`,
+              ),
+            ),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export function createQueue(url: string): Queue {
   return new Queue(QUEUE_NAME, {
-    connection: connectionFor(url),
+    connection: connectionFor(url, 'queue'),
     defaultJobOptions: DEFAULT_JOB_OPTIONS,
   });
 }
@@ -45,7 +82,7 @@ export function createWorker(
   options: Omit<WorkerOptions, 'connection'> = {},
 ): Worker {
   return new Worker(QUEUE_NAME, processor, {
-    connection: connectionFor(url),
+    connection: connectionFor(url, 'worker'),
     concurrency: 5,
     ...options,
   });

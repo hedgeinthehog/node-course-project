@@ -101,17 +101,12 @@ describe('redis-backed API features (e2e)', () => {
     const limit = 100;
     let lastStatus = 200;
     for (let i = 0; i < limit; i++) {
-      const response = await api()
-        .get('/products?limit=1')
-        .set('X-User-Id', '4242');
+      const response = await api().get('/products?limit=1');
       lastStatus = response.status;
     }
     expect(lastStatus).toBe(200);
 
-    const blocked = await api()
-      .get('/products?limit=1')
-      .set('X-User-Id', '4242')
-      .expect(429);
+    const blocked = await api().get('/products?limit=1').expect(429);
     expect(blocked.headers['content-type']).toContain(
       'application/problem+json',
     );
@@ -120,6 +115,6 @@ describe('redis-backed API features (e2e)', () => {
       status: 429,
       title: 'Too Many Requests',
     });
-    await api().get('/products?limit=1').set('X-User-Id', '4243').expect(200);
+    await api().get('/health').expect(200);
   });
 });

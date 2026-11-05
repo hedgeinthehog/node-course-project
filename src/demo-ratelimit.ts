@@ -7,11 +7,13 @@ import { RateLimiter } from './redis/rate-limiter';
 const LIMIT = 5;
 const WINDOW_MS = 10_000;
 const INSTANCES = 2;
-const CLIENT = 'demo-ratelimit';
 
 async function main() {
   const redis = new Redis(parseRedisUrls(process.env).queue);
-  await redis.del(RateLimiter.key(`user:${CLIENT}`));
+  await redis.del(
+    RateLimiter.key('ip:127.0.0.1'),
+    RateLimiter.key('ip:::ffff:127.0.0.1'),
+  );
 
   const apis = [];
   for (let i = 0; i < INSTANCES; i++) {
@@ -28,12 +30,7 @@ async function main() {
   let blocked = 0;
   let lastBlocked: Response | null = null;
   for (let i = 0; i < total; i++) {
-    const response = await fetch(
-      `${apis[i % INSTANCES].url}/products?limit=1`,
-      {
-        headers: { 'x-user-id': CLIENT },
-      },
-    );
+    const response = await fetch(`${apis[i % INSTANCES].url}/products?limit=1`);
     if (response.status === 429) {
       blocked++;
       lastBlocked = response;

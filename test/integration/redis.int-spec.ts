@@ -55,20 +55,34 @@ describe('redis: cache, sessions, rate limit, queue', () => {
     expect(ttls.size).toBeGreaterThanOrEqual(5);
   });
 
-  it('cache-aside releases only its own lock and falls back to the loader when the value is missing', async () => {
+  it('cache-aside releases only its own lock and caches a miss with a short negative TTL', async () => {
     const cache = new CacheAside(redis);
     await redis.set(CacheAside.lockKey('card:2'), 'someone-else', 'PX', 60_000);
 
     expect(await cache.release('card:2', 'my-token')).toBe(false);
     expect(await redis.get(CacheAside.lockKey('card:2'))).toBe('someone-else');
     await redis.del(CacheAside.lockKey('card:2'));
-    expect(
-      await cache.getOrLoad('card:2', async () => null, {
-        ttlSec: 10,
-        jitterSec: 0,
-      }),
-    ).toBeNull();
-    expect(await redis.exists('card:2')).toBe(0);
+
+    let loads = 0;
+    const missing = async () => {
+      loads++;
+      await sleep(30);
+      return null;
+    };
+    const options = { ttlSec: 300, jitterSec: 60, negativeTtlSec: 20 };
+    const results = await Promise.all(
+      Array.from({ length: 25 }, () =>
+        cache.getOrLoad('card:2', missing, options),
+      ),
+    );
+    expect(results.every((r) => r === null)).toBe(true);
+    expect(loads).toBe(1);
+    expect(await redis.get('card:2')).toBe('null');
+    const ttl = await redis.ttl('card:2');
+    expect(ttl).toBeGreaterThan(0);
+    expect(ttl).toBeLessThanOrEqual(50);
+    expect(await cache.getOrLoad('card:2', missing, options)).toBeNull();
+    expect(loads).toBe(1);
   });
 
   it('sessions live in Redis and every read resets the TTL', async () => {

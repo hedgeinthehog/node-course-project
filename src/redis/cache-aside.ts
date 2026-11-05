@@ -4,8 +4,11 @@ import type Redis from 'ioredis';
 export interface CacheAsideOptions {
   ttlSec: number;
   jitterSec: number;
+  negativeTtlSec?: number;
   lockMs?: number;
 }
+
+const NEGATIVE_TTL_S = 30;
 
 const RELEASE_IF_OWNED = `
 if redis.call('get', KEYS[1]) == ARGV[1] then
@@ -52,7 +55,17 @@ export class CacheAside {
       if (locked === 'OK') {
         try {
           const value = await load();
-          if (value !== null) await this.write(key, value, options);
+          await this.write(
+            key,
+            value,
+            value === null
+              ? {
+                  ...options,
+                  ttlSec: options.negativeTtlSec ?? NEGATIVE_TTL_S,
+                  jitterSec: Math.min(options.jitterSec, NEGATIVE_TTL_S),
+                }
+              : options,
+          );
           return value;
         } finally {
           await this.release(key, token);

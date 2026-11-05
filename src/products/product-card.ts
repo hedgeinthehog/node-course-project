@@ -5,7 +5,11 @@ export interface ProductCardDto extends ProductDto {
   sold: number;
 }
 
-export const PRODUCT_CARD_TTL = { ttlSec: 300, jitterSec: 60 };
+export const PRODUCT_CARD_TTL = {
+  ttlSec: 300,
+  jitterSec: 60,
+  negativeTtlSec: 30,
+};
 
 export const productCardKey = (id: number | string) => `product:${id}`;
 

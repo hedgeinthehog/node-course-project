@@ -20,9 +20,7 @@ export class RateLimitGuard implements CanActivate {
     const request = context.switchToHttp().getRequest<Request>();
     if (request.path === '/health') return true;
     const response = context.switchToHttp().getResponse<Response>();
-    const client = request.header('x-user-id')
-      ? `user:${request.header('x-user-id')}`
-      : `ip:${request.ip}`;
+    const client = `ip:${request.ip}`;
 
     let verdict;
     try {
