@@ -58,6 +58,14 @@ async function main() {
   dbCalls = 0;
   for (let i = 0; i < WARM_READS; i++) await card(ids[i % ids.length]);
   const dbCallsWarm = dbCalls;
+
+  const missing = Math.max(...ids) + 1_000_000;
+  dbCalls = 0;
+  const misses = await Promise.all(
+    Array.from({ length: CONCURRENT }, () => card(missing)),
+  );
+  const dbCallsMissing = dbCalls;
+  const negativeTtl = await redis.ttl(productCardKey(missing));
   const lockLeft = await redis.exists(
     CacheAside.lockKey(productCardKey(target)),
   );
@@ -78,6 +86,9 @@ async function main() {
     'lock-left': lockLeft,
     'warm-reads': WARM_READS,
     'db-calls-warm': dbCallsWarm,
+    'concurrent-missing': CONCURRENT,
+    'db-calls-missing': dbCallsMissing,
+    'negative-ttl': negativeTtl,
   });
   finish(
     policy !== 'noeviction' &&
@@ -87,7 +98,11 @@ async function main() {
       dbCallsStampede === 1 &&
       identical &&
       lockLeft === 0 &&
-      dbCallsWarm === 0,
+      dbCallsWarm === 0 &&
+      misses.every((miss) => miss === null) &&
+      dbCallsMissing === 1 &&
+      negativeTtl > 0 &&
+      negativeTtl <= 60,
     'the cache absorbed the stampede with one database read and served the warm reads without any',
   );
 }
