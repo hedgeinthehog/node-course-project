@@ -1,9 +1,10 @@
 import amqp from 'amqplib';
 import { DataSource } from 'typeorm';
-import { parseBrokerUrl } from './config/env.schema';
+import { parseBrokerUrl, parseRedisUrls } from './config/env.schema';
 import { dataSourceOptions } from './data-source';
 import { ConsumerSignal, PREFETCH, startConsumer } from './events/consumer';
 import { ORDER_PLACED_QUEUE, RETRY_DELAY_MS } from './events/topology';
+import { createQueue, enqueue, JOBS } from './queue/queue';
 
 const tag = `consumer ${process.pid}`;
 const crashAfterEffect = process.env.CONSUMER_CRASH_AFTER_EFFECT === '1';
@@ -34,6 +35,7 @@ function report(signal: ConsumerSignal) {
 
 async function main() {
   const dataSource = await new DataSource(dataSourceOptions).initialize();
+  const jobs = createQueue(parseRedisUrls(process.env).queue);
   const connection = await amqp.connect(parseBrokerUrl(process.env));
   const fail = (reason: string) => {
     console.error(`${tag}: ${reason}`);
@@ -45,6 +47,14 @@ async function main() {
   console.log(`${tag}: consuming ${ORDER_PLACED_QUEUE}, prefetch=${PREFETCH}`);
   const consumer = await startConsumer(connection, dataSource, {
     observe: report,
+    afterEffect: async (event) => {
+      await enqueue(
+        jobs,
+        JOBS.confirmation,
+        { orderId: event.payload.orderId, eventId: event.eventId },
+        { jobId: event.eventId },
+      );
+    },
     onClose: fail,
   });
 
@@ -52,6 +62,7 @@ async function main() {
     await consumer.stop();
     connection.removeAllListeners('close');
     await connection.close();
+    await jobs.close();
     await dataSource.destroy();
     process.exit(0);
   };

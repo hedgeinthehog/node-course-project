@@ -75,5 +75,30 @@ services:
       timeout: 10s
       retries: 12
 
+  redis-cache:
+    image: redis:8-alpine
+    command: ['redis-server', '--maxmemory', '64mb', '--maxmemory-policy', 'allkeys-lru', '--save', '', '--appendonly', 'no']
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  redis-queue:
+    image: redis:8-alpine
+    command: ['redis-server', '--maxmemory-policy', 'noeviction', '--appendonly', 'yes', '--appendfsync', 'everysec']
+    ports:
+      - '6382:6379'
+    volumes:
+      - redisqueue:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
 volumes:
   pgdata:
+  redisqueue:

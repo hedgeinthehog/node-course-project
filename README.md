@@ -11,11 +11,12 @@
 Сам сервер — NestJS, дані в Postgres через TypeORM-репозиторії (`src/entities/`, ДЗ #13); на кордоні стоїть
 `express-openapi-validator` (запити й відповіді звіряються зі спекою, помилки віддаються як
 `application/problem+json`). Події домену йдуть у RabbitMQ через transactional outbox (ДЗ #19 і #22, розділи
-«Async-події через RabbitMQ» та «Outbox та ідемпотентність»).
+«Async-події через RabbitMQ» та «Outbox та ідемпотентність»); Redis дає кеш, сесії, ліміти і чергу BullMQ
+(ДЗ #23, розділ «Redis: кеш, сесії, ліміти, черга»).
 
 ## Вимоги
 
-Node.js ≥ 22.12.0, Docker з Compose (для Postgres, RabbitMQ, образу й тестів на testcontainers).
+Node.js ≥ 22.12.0, Docker з Compose (для Postgres, RabbitMQ, двох Redis, образу й тестів на testcontainers).
 
 ## Запуск
 
@@ -35,6 +36,12 @@ npm start
 
 ```bash
 npm run consume
+```
+
+Воркер черги BullMQ (листи-підтвердження, перегрів кешу за планувальником) — ще один процес:
+
+```bash
+npm run worker
 ```
 
 Порт API задається змінною `PORT`:
@@ -57,6 +64,10 @@ PORT=8080 npm start
 | `DB_URL` | так | — | URL **PgBouncer** (не Postgres напряму) **без облікових даних**, напр. `postgres://localhost:6432/marketplace` | сховище: локальний `.env` поза git (dev), env оточення платформи (prod) |
 | `DB_PASSWORD_FILE` | так | — | шлях до файла-секрета формату `user:password`, напр. `secrets/db_password` | сховище: файл-секрет поза git, ротується `rotate.sh`; шаблон — `secrets/db_password.example` |
 | `BROKER_URL` | так | — | AMQP-URL RabbitMQ **з обліковими даними**, напр. `amqp://marketplace:marketplace_dev@localhost:5672`; читають API (публікація `order.placed`), споживач і демо ДЗ #19 | сховище: локальний `.env` поза git (dev), env оточення платформи (prod); у `.env.example` — дев-користувач стенда, він не секрет |
+| `REDIS_URL` | так | — | кеш-інстанс Redis (`allkeys-lru`), напр. `redis://localhost:6379`; картки товарів і локи | сховище: локальний `.env` поза git (dev), env оточення платформи (prod) |
+| `REDIS_QUEUE_URL` | так | — | Redis під стан (`noeviction` + AOF), напр. `redis://localhost:6382`; черга BullMQ, сесії, лічильники ліміту | сховище: те саме |
+| `RATE_LIMIT` | ні | `100` | скільки запитів клієнта пропускає ковзне вікно | `.env` (dev) / env оточення (prod) |
+| `RATE_LIMIT_WINDOW_MS` | ні | `10000` | довжина ковзного вікна ліміту, мс | `.env` (dev) / env оточення (prod) |
 | `PACT_BROKER_URL` | ні | — | адреса Pact Broker для контрактних тестів (`http://127.0.0.1:9292` для compose); застосунок її не використовує, читає лише тестовий код | сховище: локальний `.env` поза git (dev), secrets GitHub (CI) |
 | `PACT_BROKER_TOKEN` | ні | — | bearer-токен брокера; для локального compose-брокера порожній | сховище: локальний `.env` поза git (dev), secrets GitHub (CI) |
 
@@ -74,9 +85,11 @@ compose (`marketplace` / `marketplace_dev`), таким самим «не сек
 
 Стенд для локального запуску — `docker-compose.yml`: Postgres (порт хоста `5433` — лише для прямого
 адмін-доступу), PgBouncer перед ним (порт хоста `6432` — сюди ходить застосунок, див. «Data layer ops»),
-Pact Broker (`9292`, див. «Тестування») і RabbitMQ 4.2 (`5672` — AMQP, `15672` — вебморда менеджменту; healthcheck
+Pact Broker (`9292`, див. «Тестування»), RabbitMQ 4.2 (`5672` — AMQP, `15672` — вебморда менеджменту; healthcheck
 — `rabbitmq-diagnostics -q check_running`, бо між відкриттям TCP-порту і готовністю Erlang-ноди приймати
-`basic.publish` є вікно, у якому клієнт ловить `ECONNRESET`). `npm run db:up` чекає на healthcheck усіх сервісів,
+`basic.publish` є вікно, у якому клієнт ловить `ECONNRESET`) і два Redis 8 — `redis-cache` (`6379`,
+`allkeys-lru`) та `redis-queue` (`6382`, `noeviction` + AOF; див. «Redis: кеш, сесії, ліміти, черга»).
+`npm run db:up` чекає на healthcheck усіх сервісів,
 тож `npm run db:up && npm start` не стартує раніше за готовність стенда. `db/init.sql` створює дві рівноправні login-ролі `marketplace_a`
 і `marketplace_b` (обидві — члени групової ролі `marketplace`, власника бази) зі стартовим паролем
 `marketplace_dev`. Стартовий вміст файла-секрета — `marketplace_a:marketplace_dev`. Після
@@ -144,6 +157,7 @@ docker build -t myapp . && docker run --rm myapp ls -a /app && docker run --rm m
 | --- | --- |
 | `/products` | `GET /products` (cursor-пагінація), `POST /products` (Idempotency-Key), `GET /products/{id}` |
 | `/orders` | `GET /orders` (cursor-пагінація), `POST /orders` (Idempotency-Key), `GET /orders/{id}`, `PATCH /orders/{id}/status` (життєвий цикл), `GET /orders/{id}/events` (SSE) |
+| `/sessions` | `POST /sessions` (сесія в Redis), `GET /sessions/me` (`X-Session-Id`, читання подовжує TTL) — ДЗ #23 |
 
 - **Cursor-пагінація**: `?limit=&cursor=`, відповідь `{ items, next_cursor }`, `next_cursor: null` — сторінок більше немає. Курсор — непрозорий токен.
 - **Idempotency-Key**: обовʼязковий header на обох POST. Той самий ключ + те саме тіло → та сама відповідь `201` + `Idempotency-Replay: true`; той самий ключ + інше тіло → `422`. Ключі живуть у таблиці `idempotency_keys` в одній транзакції з ресурсом (ДЗ #22).
@@ -588,13 +602,13 @@ cp secrets/db_password.example secrets/db_password
 ## Тестування
 
 Драбинка довіри: integration проти справжнього Postgres → E2E повного застосунку → контракт Pact →
-брокер і `can-i-deploy`. Потрібен лише запущений Docker: Postgres і RabbitMQ для тестів піднімає testcontainers,
+брокер і `can-i-deploy`. Потрібен лише запущений Docker: Postgres, RabbitMQ і Redis для тестів піднімає testcontainers,
 compose для перших чотирьох команд не потрібен.
 
 | Команда | Що запускає | Результат прогону |
 | --- | --- | --- |
-| `npm run test:integration` | `test/integration/` — репозиторії, checkout, воркер, outbox і relay, споживач `order.placed` проти Postgres і RabbitMQ у testcontainers | 6 наборів, 28 тестів |
-| `npm run test:e2e` | `test/e2e/` — повний `AppModule` через supertest: замовлення, ключ ідемпотентності, realtime, relay `order.placed` | 11 тестів |
+| `npm run test:integration` | `test/integration/` — репозиторії, checkout, воркер, outbox і relay, споживач `order.placed`, кеш/сесії/ліміт/черга проти Postgres, RabbitMQ і Redis у testcontainers | 7 наборів, 33 тести |
+| `npm run test:e2e` | `test/e2e/` — повний `AppModule` через supertest: замовлення, ключ ідемпотентності, realtime, relay `order.placed`, картка з кешу, сесії, `429` | 14 тестів |
 | `npm run test:contract` | `test/contract/consumer.pact-spec.ts` — consumer-тест, пише `pacts/*.json` | 3 interactions |
 | `npm run verify:provider` | `test/contract/provider.pact-spec.ts` — справжній застосунок проти контракту | 3 × `has a matching body (OK)` |
 
@@ -643,6 +657,8 @@ compose для перших чотирьох команд не потрібен.
 | `tasks-worker.int-spec.ts` | `FOR UPDATE SKIP LOCKED` (рівно один раз на трьох воркерах), повтор, `failed` після ліміту спроб із відкатом savepoint |
 | `order-placed-consumer.int-spec.ts` | справжній RabbitMQ: дубль події → один рядок `shipments` і одна позначка в `processed_messages`; ефект, що падає → три повтори через retry-чергу з паузою і DLQ з `rejected`; повідомлення поза контрактом → DLQ з `rejected` без повторів; crash-loop (`requeue` × 4) → DLQ з `delivery_limit` (ДЗ #19) |
 | `outbox.int-spec.ts` | замовлення і рядок outbox одним COMMIT; падіння після вставки в outbox відкочує обидва; ключ ідемпотентності: replay, `422` на інше тіло, пʼять паралельних запитів з одним ключем → одне замовлення, невдалий запит ключа не лишає; relay публікує по порядку і позначає `published_at`; publish, що падає завжди → backoff, після пʼяти спроб подія в DLQ і `failed_at`; падіння relay між publish і UPDATE → подія вдруге, ефект один, inbox з однією позначкою (ДЗ #22) |
+| `redis.int-spec.ts` | 30 одночасних промахів → один виклик loader-а, TTL із джитером, лок не знімає чужий токен, 25 промахів на відсутній id → один виклик і негативний кеш; сесія подовжує TTL на читанні; ліміт спільний для двох екземплярів і точний під 50 паралельними запитами; черга дедуплікує за `jobId` і доводить падучу задачу до `completed` за три спроби (ДЗ #23) |
+| `test/e2e/redis.e2e-spec.ts` | картка товару з кешу з TTL 295–360 с, інвалідація після замовлення; `POST /sessions` → `GET /sessions/me` і будь-який запит із `X-Session-Id` подовжують TTL, `401` на невідомий id; `429` problem+json із `Retry-After` після ліміту, `/health` поза лімітом (ДЗ #23) |
 | `test/e2e/orders.e2e-spec.ts` | створити товар → оформити замовлення → прочитати обидва → повтор з тим самим `Idempotency-Key`; `400` без ключа, `404` на невідоме замовлення, `409` при нестачі товару, `422` на той самий ключ з іншим тілом; relay усередині API виносить `order.placed` рівно один раз, повтор за ключем — не публікує (ДЗ #19, #22) |
 | `test/e2e/realtime.e2e-spec.ts` | життєвий цикл статусів і `409`; SSE: `Last-Event-ID`, `400`/`403`/`404` для не-власника, нумерація після рестарту; WS: кімнати, `forbidden`/`unauthenticated` (ДЗ #18) |
 
@@ -719,8 +735,8 @@ curl -s "$PACT_BROKER_URL/can-i-deploy?pacticipant=marketplace-web&version=$VERS
 
 ### CI
 
-`.github/workflows/ci.yml`: job `db` — compose-стенд (Postgres, PgBouncer, RabbitMQ), міграції, демо ДЗ #14,
-#19 і #22, бекап і drill; job `tests` — `test:integration` і `test:e2e`; job `contract` — pipeline контракту,
+`.github/workflows/ci.yml`: job `db` — compose-стенд (Postgres, PgBouncer, RabbitMQ, два Redis), міграції, демо
+ДЗ #14, #19, #22 і #23, бекап і drill; job `tests` — `test:integration` і `test:e2e`; job `contract` — pipeline контракту,
 де кожен тег ставить крок деплою, а не крок перевірки:
 
 1. `test:contract` → публікація контракту (`scripts/pact-broker.sh publish`);
@@ -929,6 +945,9 @@ eventId`, `waitForConfirms()` до позначки `published_at`. Ідемпо
 - `noAck: false`, `channel.ack` — **після** ефекту. `prefetch=20` (константа `PREFETCH`): ефект — один `INSERT`
   на 2–5 мс, 20 × 5 мс = 0,1 с ≪ `consumer_timeout` 30 хв; `prefetch=1` для 2-мілісекундної роботи — зайвий
   round-trip на кожне повідомлення, а дефолтний 0 — перший споживач забирає всю чергу, другий простоює.
+- Після ефекту споживач ставить у чергу BullMQ задачу `order.confirmation` з `jobId = eventId` (ДЗ #23):
+  повторна доставка (у тому числі після невдалого `add`) дає ту саму задачу, а ефект, що остаточно впав, листа
+  не породжує.
 - Ефект — створити відправлення: `INSERT INTO shipments (order_id, event_id) … ON CONFLICT (order_id) DO NOTHING
   RETURNING order_id` (міграція `Shipments`): природний ключ бізнес-операції, порожній `RETURNING` → дубль, ефект
   пропущено. Сховище — та сама Postgres, разом із позначкою в `processed_messages` (ДЗ #22), тому дедуп переживає
@@ -1198,14 +1217,191 @@ Exactly-once доставки не існує — це задача двох г�
 вони дають exactly-once **результат**.
 
 
+## Redis: кеш, сесії, ліміти, черга
+
+Поверх події з ДЗ #22 у стенді зʼявляється Redis — і одразу **два** інстанси (`docker-compose.yml`):
+
+| Сервіс | Порт хоста | Конфіг | Що там живе |
+| --- | --- | --- | --- |
+| `redis-cache` | `6379` | `--maxmemory 64mb --maxmemory-policy allkeys-lru`, без persistence | картки товарів (`product:<id>`) і single-flight локи — усе, що можна втратити |
+| `redis-queue` | `6382` | `--maxmemory-policy noeviction --appendonly yes --appendfsync everysec`, том `redisqueue` | черга BullMQ, сесії, лічильники rate-limit — усе, що втрачати не можна |
+
+Чому два: кеш потребує `maxmemory` + `allkeys-lru`, а документація BullMQ вимагає протилежного —
+`noeviction`, бо черга «cannot work properly if Redis evicts keys arbitrarily». `maxmemory-policy` одна на
+весь процес, `SELECT 1` її не розводить, тому це два контейнери. Сесії й лічильники ліміту теж у
+`redis-queue`: сесія в `allkeys-lru` колись вилетить і дасть розлогінення, яке ніхто не відтворить, а
+вилетілий лічильник обнулив би ліміт під навантаженням — рівно тоді, коли він потрібен. Третій інстанс під
+«стан» був би чистішим, але для курсового два контейнери достатньо; у `README` це розмежування і є відповідь
+«що обрав і чому». Адреси — `REDIS_URL` і `REDIS_QUEUE_URL` у тому самому сховищі, що й база (ДЗ #11).
+
+### Cache-aside на картці товару
+
+«Важке» читання — `GET /products/{id}`: картка з `sold` (сума `order_items.quantity` по нескасованих
+замовленнях, `JOIN` + `GROUP BY`, `src/products/product-card.ts`). `CacheAside` (`src/redis/cache-aside.ts`):
+промах → база → `SET key value EX ttl`, влучання → тільки Redis. TTL завжди з джитером: `300 + random(0..60)` с,
+інакше ключі, прогріті одним проходом, протухнуть в одну секунду і дадуть stampede на порожньому місці.
+Явна інвалідація — додатково: `OrdersService.create` після успішного checkout видаляє картки куплених товарів,
+тож залишок після покупки читається свіжим (E2E-тест); планувальник черги раз на хвилину перегріває 20
+найновіших карток.
+
+Промах у базі теж кешується — негативний кеш: `null` лягає в Redis на короткі `30 + random(0..30)` с
+(`negativeTtlSec`), інакше лавина на неіснуючий id (`GET /products/424242` × 25) дає 25 походів у базу: лок
+відпрацьовує, але переможець нічого не записує, і кожен наступний очікувач іде вантажити сам. Короткий TTL —
+щоб товар, що зʼявиться, не чекав 5 хвилин. Кеш не роняє запити: кожна операція з Redis обгорнута, помилка
+читання — промах, помилка запису — просто не закешували, недоступний Redis — пішли в базу напряму. На стоковому конфізі (`maxmemory 0`, `noeviction`) Redis
+починає кидати `OOM command not allowed` на запис — саме тому в кеш-інстансі стоїть `allkeys-lru`.
+
+### Захист від stampede: single-flight лок
+
+N одночасних промахів на один ключ дають один похід у базу: перший бере `SET lock:<key> <token> NX PX 3000`,
+вантажить, пише кеш і знімає лок; решта чекають по 20 мс, перечитують кеш і виходять з нього. Знімається лише
+**свій** лок — Lua `if GET == token then DEL` (compare-and-delete працює на будь-якій версії; `DELEX … IFEQ`
+з 8.4 робить те саме однією командою). Голий `DEL` зняв би чужий лок: між «мій лок протух» і «я його знімаю»
+вміщається чужий `SET NX`. Якщо переможець упав і лок протух — черговий очікувач бере його сам, а якщо Redis
+недоступний узагалі — кожен іде в базу напряму.
+
+**Що станеться, якщо цей лок зламається — і чому це прийнятно.** Лок не рятує від паузи, довшої за його
+TTL: процес завмер на GC, лок протух, його взяв інший — і двоє одночасно впевнені, що лок у них. Наслідок тут —
+два походи в базу замість одного і два однакові `SET` у кеш: кілька центів і ніякого зіпсованого стану. Тому
+це *оптимізація*, і fencing token їй не потрібен. Той самий `SET NX PX` у ролі захисту бізнес-інваріанта
+(«не продати більше, ніж є») коштував би подвійного списання — і саме тому в checkout (ДЗ #14) стоїть не лок,
+а атомарний `UPDATE … WHERE stock >= n`, у споживачі (ДЗ #19/#22) — унікальний ключ і inbox, а не Redis.
+Розподілений лок не замінює ідемпотентність: він діє лише у вікні валідності й лише поки процес не зупинявся.
+
+### Сесії з rolling TTL
+
+`SessionStore` (`src/redis/session.store.ts`) на `redis-queue`: `POST /sessions {user_id}` → `SET session:<id>
+{...} EX 1800`; `SessionMiddleware` на кожному запиті з `X-Session-Id` читає сесію через `GETEX session:<id>
+EX 1800` — одна команда читає і подовжує TTL, тож активного користувача не викине посеред роботи; `GET
+/sessions/me` лише віддає те, що middleware поклав у запит. Сховище — Redis, не памʼять процесу: після
+рестарту API сесія жива (демо перезапускає застосунок між запитами). Невідомий або протухлий id — `401`
+problem+json. Цей же механізм у ДЗ #24 зустрінеться з JWT.
+
+### Rate-limit на спільному сховищі
+
+`RateLimiter` (`src/redis/rate-limiter.ts`) — **ковзне вікно** на sorted set, одним Lua-скриптом
+(`ZREMRANGEBYSCORE` → `ZCARD` → `ZADD` → `PEXPIRE`): між `ZCARD` і `ZADD` інакше влазить інший под, і ліміт
+протікає саме під навантаженням — тут атомарність є вимогою коректності, а не оптимізацією. Чому ковзне: воно
+не дозволяє сплеску на межі вікон (фіксоване пропускає до 2× ліміту за кілька мілісекунд), а token bucket
+сплеск дозволяє свідомо — для публічного API замовлень сплеск нам не потрібен. Лічильник живе в
+`redis-queue`, тому два поди ділять один ліміт; клієнт — IP (`request.ip`; за reverse-proxy потрібен
+`trust proxy`, інакше всі запити зіллються в один ключ). Довільний заголовок на кшталт `X-User-Id` ключем
+бути не може — клієнт крутив би його і обходив ліміт; з автентифікацією (ДЗ #24) ключем стане `sub` токена. `RateLimitGuard`
+(`src/redis/rate-limit.guard.ts`, глобальний, окрім `/health`) віддає `429` problem+json із `Retry-After` у
+секундах до звільнення найстаршого слота і заголовки `RateLimit-Limit`/`RateLimit-Remaining`; ліміт — `RATE_LIMIT`
+за `RATE_LIMIT_WINDOW_MS` (дефолт 100 за 10 с). Якщо Redis недоступний, guard пропускає запит і пише в лог:
+для ліміту доступність сервісу важливіша за точність.
+
+### Черга BullMQ
+
+Одна черга `marketplace` (`src/queue/queue.ts`) на `redis-queue`, воркер — `npm run worker`
+(`src/queue-worker.ts`). Зʼєднання різні для двох ролей: воркер — `maxRetriesPerRequest: null`, щоб при обриві
+зʼєднання чекати Redis, а не падати; `Queue` у продюсера (споживач, демо) — `enableOfflineQueue: false`,
+`maxRetriesPerRequest: 1`, обмежений backoff перепідключення і таймаут 2 с на `add` (`enqueue()` у
+`src/queue/queue.ts`): при впалому Redis постановка задачі падає за секунди, а не висить, доки ioredis перебирає
+повтори; споживач тоді йде звичайним шляхом повтору доставки:
+
+- `order.confirmation` — споживач `order.placed` (ДЗ #19) після ефекту ставить задачу з `jobId = eventId`:
+  повторна доставка події дає ту саму задачу, два `add` з одним `jobId` — одну задачу в черзі;
+- `catalog.refresh` — планувальник `upsertJobScheduler('catalog-refresh', { every: 60000 })`: перегріває
+  картки 20 найновіших товарів у кеш. `upsert`, а не `add`: рестарт воркера не плодить планувальників
+  (`repeat`/`getRepeatableJobs` у BullMQ 6 немає);
+- дефолтні опції задач: `attempts: 3`, `backoff: { type: 'exponential', delay: 500, jitter: 0.25 }`,
+  `removeOnComplete: { age: 3600 }` (не `true` — це вимкнуло б дедуп за `jobId`), `removeOnFail: { age: 86400 }`.
+
+### Демо
+
+Чотири скрипти через `scripts/with-secrets.sh dev`, самоочисні, друкують `ключ=число`. `demo:cache` працює з
+Redis і базою напряму (брокер йому не потрібен); `demo:session` і `demo:ratelimit` піднімають справжній API в
+процесі демо (`src/redis/demo-api.ts`: `DB_URL` і файл-секрет
+збираються з `DB_*`, тому грейдеру достатньо `SKIP_VAULT=1`), тож `429`, `Retry-After` і `X-Session-Id` —
+справжні HTTP-відповіді.
+
+`npm run demo:cache` — `FLUSHDB` кеш-інстанса, 60 товарів прогріваються картками, один ключ знімається і на
+нього йдуть 25 одночасних читань, далі 100 читань теплого кеша, потім 25 одночасних читань неіснуючого id
+(негативний кеш); `db-calls` рахує виклики `loadProductCard`, тобто SQL до бази, а не виклики кешованої функції:
+
+```
+cache-lru=1
+cache-maxmemory=1
+warmed=60
+ttl-min=300
+ttl-max=358
+ttl-distinct=41
+concurrent=25
+db-calls=1
+identical-results=1
+lock-left=0
+warm-reads=100
+db-calls-warm=0
+concurrent-missing=25
+db-calls-missing=1
+negative-ttl=47
+```
+
+`npm run demo:session` — `POST /sessions`, пауза 2 с, `GET /sessions/me` (TTL до і після читається з Redis
+напряму), ще пауза і читання, рестарт API і читання після рестарту:
+
+```
+requests=4
+sessions=1
+in-redis=1
+state-noeviction=1
+ttl-before=1798
+ttl-after=1800
+ttl-renewed=1
+survives-restart=1
+```
+
+`npm run demo:ratelimit` — два екземпляри API з `RATE_LIMIT=5`, вісім запитів по колу з однієї IP-адреси:
+
+```
+instances=2
+limit=5
+window-ms=10000
+requests=8
+allowed=5
+blocked=3
+status=429
+retry-after=1
+retry-after-seconds=10
+```
+
+`npm run demo:queue` — `obliterate` черги, два `add` з одним `jobId` (задача падає двічі через лічильник у
+`data`), планувальник раз на секунду, воркер у процесі демо, вікно спостереження 3,5 с; відмовляється
+стартувати, якщо до черги підключений `npm run worker`:
+
+```
+queue-noeviction=1
+fail-times=2
+attempts=3
+completed=1
+added=2
+queued=1
+schedulers=1
+observe-ms=3500
+scheduled-runs=4
+```
+
+### Що лишилось за межами
+
+- Раннього оновлення (probabilistic early expiration) немає — на холодному ключі воно не рятує, демо показує
+  саме лок.
+- Витіснення конкретного ключа не демонструється: LRU у Redis наближений (`maxmemory-samples 5`), жертва
+  обирається з вибірки; `cache-lru`/`cache-maxmemory` читаються з `CONFIG GET` у рантаймі.
+- Сесія поки не замінює `X-User-Id` у guard-і власника (ДЗ #18) — це зробить auth у ДЗ #24.
+
+
 ## Grading
 
 ```bash
 docker compose up -d --wait
 export DB_HOST=127.0.0.1 DB_PORT=6432 DB_USER=marketplace_a DB_PASSWORD=marketplace_dev DB_NAME=marketplace
 export BROKER_URL=amqp://marketplace:marketplace_dev@127.0.0.1:5672
+export REDIS_URL=redis://127.0.0.1:6379
+export REDIS_QUEUE_URL=redis://127.0.0.1:6382
 export SKIP_VAULT=1
-npm ci && npm run build && npm run migrate
+npm ci && npm run build && npm run migrate && npm run events:topology
 bash scripts/with-secrets.sh dev bash scripts/backup.sh
 bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
 ```
@@ -1251,6 +1447,14 @@ URL) не потребують ні стенда, ні сховища.
 `npm run demo:outbox`, `npm run demo:crash-write`, `npm run demo:crash-relay`. Брокер — RabbitMQ зі стенда
 (`BROKER_URL`, схема `amqp`, порт `5672`), база — `DB_*` через PgBouncer; relay і споживач демо запускають
 самі дочірніми процесами, `npm start` для демо не потрібен.
+
+ДЗ #23 (ті самі `export`; `seed` не потрібен): `npm run demo:cache`, `npm run demo:session`,
+`npm run demo:ratelimit`, `npm run demo:queue`. `REDIS_URL` — кеш-інстанс (`redis-cache`, порт `6379`,
+`allkeys-lru`), `REDIS_QUEUE_URL` — інстанс під чергу, сесії й ліміти (`redis-queue`, порт `6382`,
+`noeviction`); обидва без пароля, як у compose. `demo:session` і `demo:ratelimit` піднімають API всередині
+демо, тому їм потрібні і `BROKER_URL`, і `DB_*` з блоку вище; `demo:queue` відмовиться стартувати, якщо
+паралельно запущений `npm run worker`. Топологію брокера демо оголошують самі, `events:topology` у блоці вище
+потрібен лише для `npm start`.
 
 ## Перевірки
 
