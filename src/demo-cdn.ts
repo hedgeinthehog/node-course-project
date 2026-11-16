@@ -25,6 +25,10 @@ async function main() {
   const missBody = await miss.text();
   const hit = await fetch(`${base}/${first}`);
   await hit.text();
+  const head = await fetch(`${base}/${first}`, { method: 'HEAD' });
+  const headBody = await head.text();
+  const post = await fetch(`${base}/${first}`, { method: 'POST' });
+  await post.text();
 
   const second = await publishAsset(storage, NAME, v2, 'text/css');
   const fresh = await fetch(`${base}/${second}`);
@@ -41,6 +45,14 @@ async function main() {
     'edge-miss': miss.status,
     'edge-hit': hit.status,
     'cache-hit': hit.headers.get('x-cache') === 'HIT' ? 1 : 0,
+    'edge-head': head.status,
+    'head-headers-only':
+      headBody === '' &&
+      head.headers.get('content-length') === String(v1.length) &&
+      head.headers.get('x-cache') === 'HIT'
+        ? 1
+        : 0,
+    'edge-post': post.status,
     'immutable-cache-control': miss.headers
       .get('cache-control')
       ?.includes('immutable')
@@ -62,6 +74,9 @@ async function main() {
       miss.headers.get('x-cache') === 'MISS' &&
       hit.status === 200 &&
       hit.headers.get('x-cache') === 'HIT' &&
+      head.status === 200 &&
+      headBody === '' &&
+      post.status === 405 &&
       second !== first &&
       fresh.status === 200 &&
       freshBody === v2.toString(),

@@ -13,6 +13,8 @@ import { resetDatabase } from '../integration/testkit/database';
 import { bearer } from './auth-helpers';
 import { createApp } from './create-app';
 
+const PNG_SIGNATURE = Buffer.from('\x89PNG\r\n\x1a\n', 'latin1');
+
 async function put(url: string, body: Buffer, contentType?: string) {
   const response = await fetch(url, {
     method: 'PUT',
@@ -43,7 +45,7 @@ describe('files (e2e)', () => {
     const stranger = await user();
     const asBuyer = await bearer(app, buyer);
     const asStranger = await bearer(app, stranger);
-    const bytes = Buffer.alloc(2048, 7);
+    const bytes = Buffer.concat([PNG_SIGNATURE, Buffer.alloc(2040, 7)]);
     const body = {
       filename: '../../etc/passwd',
       content_type: 'image/png',
@@ -143,6 +145,50 @@ describe('files (e2e)', () => {
     await api().get(`/files/${intent.body.file_id}`).set(asBuyer).expect(409);
   });
 
+  it('commit sniffs the magic bytes and refuses content that is not the declared type', async () => {
+    const buyer = await given(dataSource).user();
+    const asBuyer = await bearer(app, buyer);
+    const html = Buffer.alloc(2048, ' ');
+    html.write('<html><script>alert(1)</script></html>');
+    const intentFor = async (key: string, contentType: string) =>
+      (
+        await api()
+          .post('/uploads/intent')
+          .set(asBuyer)
+          .set('Idempotency-Key', key)
+          .send({ filename: 'x', content_type: contentType, size: html.length })
+          .expect(200)
+      ).body;
+
+    const disguised = await intentFor('sniff-1', 'image/png');
+    expect(await put(disguised.upload.url, html, 'image/png')).toBe(200);
+    const refused = await api()
+      .post(`/uploads/${disguised.file_id}/commit`)
+      .set(asBuyer)
+      .expect(409);
+    expect(refused.body.detail).toContain('not image/png');
+    const files = dataSource.getRepository(StoredFile);
+    expect(
+      (await files.findOneByOrFail({ id: disguised.file_id })).status,
+    ).toBe('pending');
+    await api().get(`/files/${disguised.file_id}`).set(asBuyer).expect(409);
+
+    const pdf = await intentFor('sniff-2', 'application/pdf');
+    const document = Buffer.alloc(2048, ' ');
+    document.write('%PDF-1.7');
+    expect(await put(pdf.upload.url, document, 'application/pdf')).toBe(200);
+    await api().post(`/uploads/${pdf.file_id}/commit`).set(asBuyer).expect(200);
+
+    const opaque = await intentFor('sniff-3', 'application/octet-stream');
+    expect(await put(opaque.upload.url, html, 'application/octet-stream')).toBe(
+      200,
+    );
+    await api()
+      .post(`/uploads/${opaque.file_id}/commit`)
+      .set(asBuyer)
+      .expect(200);
+  });
+
   it('multipart: parts reports what the storage holds, commit completes with a multipart ETag', async () => {
     const buyer = await given(dataSource).user();
     const asBuyer = await bearer(app, buyer);
@@ -223,6 +269,15 @@ describe('files (e2e)', () => {
       const hit = await fetch(`${base}/${first}`);
       expect(hit.headers.get('x-cache')).toBe('HIT');
       expect(await hit.text()).toBe('a{}');
+      const head = await fetch(`${base}/${first}`, { method: 'HEAD' });
+      expect(head.status).toBe(200);
+      expect(head.headers.get('x-cache')).toBe('HIT');
+      expect(head.headers.get('content-length')).toBe('3');
+      expect(await head.text()).toBe('');
+      const post = await fetch(`${base}/${first}`, { method: 'POST' });
+      expect(post.status).toBe(405);
+      expect(post.headers.get('allow')).toBe('GET, HEAD');
+      await post.text();
 
       const second = await publishAsset(
         storage,
@@ -241,6 +296,40 @@ describe('files (e2e)', () => {
     } finally {
       await new Promise<void>((resolve) => edge.close(() => resolve()));
       await storage.deleteAll(published);
+    }
+  });
+
+  it('the edge cache is bounded: least recently used objects are evicted by volume, oversized ones are not cached', async () => {
+    const body = (letter: string, size = 1000) => Buffer.alloc(size, letter);
+    const keys = [
+      await publishAsset(storage, 'lru-a.css', body('a'), 'text/css'),
+      await publishAsset(storage, 'lru-b.css', body('b'), 'text/css'),
+      await publishAsset(storage, 'lru-c.css', body('c'), 'text/css'),
+      await publishAsset(storage, 'lru-big.css', body('x', 4000), 'text/css'),
+    ];
+    const [a, b, c, big] = keys;
+    const edge = createEdge(storage, { maxBytes: 2500 });
+    await new Promise<void>((resolve) => edge.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${(edge.address() as AddressInfo).port}`;
+    const verdict = async (key: string, method = 'GET') => {
+      const response = await fetch(`${base}/${key}`, { method });
+      await response.text();
+      return response.headers.get('x-cache');
+    };
+    try {
+      expect(await verdict(a, 'HEAD')).toBe('MISS');
+      expect(await verdict(b)).toBe('MISS');
+      expect(await verdict(a)).toBe('HIT');
+      expect(await verdict(c)).toBe('MISS');
+      expect(await verdict(a)).toBe('HIT');
+      expect(await verdict(c)).toBe('HIT');
+      expect(await verdict(b)).toBe('MISS');
+      expect(await verdict(big)).toBe('MISS');
+      expect(await verdict(big)).toBe('MISS');
+      expect(await verdict(b)).toBe('HIT');
+    } finally {
+      await new Promise<void>((resolve) => edge.close(() => resolve()));
+      await storage.deleteAll(keys);
     }
   });
 });

@@ -17,6 +17,25 @@ export const CONTENT_TYPES: Record<string, string> = {
 export const extensionFor = (contentType: string): string | undefined =>
   CONTENT_TYPES[contentType];
 
+export const SNIFF_BYTES = 256;
+
+const startsWith = (head: Buffer, signature: string, offset = 0) =>
+  head.subarray(offset, offset + signature.length).toString('latin1') ===
+  signature;
+
+const SIGNATURES: Record<string, (head: Buffer) => boolean> = {
+  'image/jpeg': (head) => startsWith(head, '\xff\xd8\xff'),
+  'image/png': (head) => startsWith(head, '\x89PNG\r\n\x1a\n'),
+  'image/webp': (head) =>
+    startsWith(head, 'RIFF') && startsWith(head, 'WEBP', 8),
+  'application/pdf': (head) => startsWith(head, '%PDF-'),
+};
+
+export function matchesContentType(contentType: string, head: Buffer) {
+  const signature = SIGNATURES[contentType];
+  return signature ? signature(head) : true;
+}
+
 export const isMultipart = (size: number) => size > MULTIPART_THRESHOLD;
 
 export function partSizeFor(size: number): number {

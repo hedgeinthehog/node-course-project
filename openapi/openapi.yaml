@@ -656,7 +656,9 @@ paths:
       summary: Step 2 of an upload — verify the object exists and mark the file completed
       description: >-
         For a multipart upload completes it from the parts the storage lists. Then HeadObject: the object must
-        exist and its size must match the declared one, otherwise `409` and the file stays `pending`.
+        exist and its size must match the declared one; then the first 256 bytes are read (ranged GetObject) and
+        their magic bytes must match the declared `content_type` (`application/octet-stream` is opaque and has
+        no signature). Otherwise `409` and the file stays `pending`.
         Committing an already completed file returns it again.
       security:
         - bearerAuth: []

@@ -173,6 +173,22 @@ export class Storage {
     }
   }
 
+  async readHead(key: string, length: number): Promise<Buffer | null> {
+    try {
+      const object = await this.client.send(
+        new GetObjectCommand({
+          Bucket: this.bucket,
+          Key: key,
+          Range: `bytes=0-${length - 1}`,
+        }),
+      );
+      return Buffer.from((await object.Body?.transformToByteArray()) ?? []);
+    } catch (err) {
+      if (isMissing(err)) return null;
+      throw err;
+    }
+  }
+
   async put(
     key: string,
     body: Buffer,

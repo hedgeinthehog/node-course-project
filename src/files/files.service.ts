@@ -16,10 +16,12 @@ import {
   extensionFor,
   GET_URL_TTL_S,
   isMultipart,
+  matchesContentType,
   MAX_FILE_SIZE,
   partCountFor,
   partSizeFor,
   PUT_URL_TTL_S,
+  SNIFF_BYTES,
 } from './upload-policy';
 
 export interface UploadIntentDto {
@@ -222,6 +224,12 @@ export class FilesService {
     if (object.size !== size) {
       throw new ConflictException(
         `uploaded object has ${object.size} bytes, the intent declared ${size}`,
+      );
+    }
+    const head = await this.storage.readHead(file.key, SNIFF_BYTES);
+    if (!head || !matchesContentType(file.contentType, head)) {
+      throw new ConflictException(
+        `uploaded bytes are not ${file.contentType}, the declared content type`,
       );
     }
     file.status = 'completed';

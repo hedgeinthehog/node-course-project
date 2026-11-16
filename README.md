@@ -47,7 +47,8 @@ npm run consume
 npm run worker
 ```
 
-Кеш-шар перед сховищем для публічних ассетів (локальна форма CDN з ДЗ #26, порт `EDGE_PORT`, дефолт `3200`):
+Кеш-шар перед сховищем для публічних ассетів (локальна форма CDN з ДЗ #26, порт `EDGE_PORT`, дефолт `3200`;
+ліміт кешу `EDGE_CACHE_MAX_BYTES`, дефолт 64 МіБ):
 
 ```bash
 npm run edge
@@ -680,7 +681,7 @@ compose для перших чотирьох команд не потрібен.
 | `outbox.int-spec.ts` | замовлення і рядок outbox одним COMMIT; падіння після вставки в outbox відкочує обидва; ключ ідемпотентності: replay, `422` на інше тіло, пʼять паралельних запитів з одним ключем → одне замовлення, невдалий запит ключа не лишає; relay публікує по порядку і позначає `published_at`; publish, що падає завжди → backoff, після пʼяти спроб подія в DLQ і `failed_at`; падіння relay між publish і UPDATE → подія вдруге, ефект один, inbox з однією позначкою (ДЗ #22) |
 | `redis.int-spec.ts` | 30 одночасних промахів → один виклик loader-а, TTL із джитером, лок не знімає чужий токен, 25 промахів на відсутній id → один виклик і негативний кеш; сесія подовжує TTL на читанні; ліміт спільний для двох екземплярів і точний під 50 паралельними запитами; черга дедуплікує за `jobId` і доводить падучу задачу до `completed` за три спроби (ДЗ #23) |
 | `test/e2e/redis.e2e-spec.ts` | картка товару з кешу з TTL 295–360 с, інвалідація після замовлення; `POST /sessions` → `GET /sessions/me` і будь-який запит із `X-Session-Id` подовжують TTL, `401` на невідомий id; `429` problem+json із `Retry-After` після ліміту, `/health` поза лімітом (ДЗ #23) |
-| `test/e2e/files.e2e-spec.ts` | intent: ключ `uploads/{userId}/{uuid}.png` без слідів `filename`, replay за Idempotency-Key, `400` на тип поза allowlist; commit до байтів → `409`, підмінений ключ у presigned → `403`, PUT байтів → commit `200`, повторний commit `200`; `GET /files/{id}` → `302` і ті самі байти, чужому `403`, без токена `401`; розмір не збігся → `409`; multipart: 2 з 3 частин → `parts` бачить `[1,2]` і дає URL лише на `[3]`, HeadObject до complete — нічого, commit `409`, після третьої частини complete `200` з ETag `-3`; ассети: прямий GET у бакет `403`, edge `MISS` → `HIT` з `immutable`, новий вміст — нове імʼя (ДЗ #26) |
+| `test/e2e/files.e2e-spec.ts` | intent: ключ `uploads/{userId}/{uuid}.png` без слідів `filename`, replay за Idempotency-Key, `400` на тип поза allowlist; commit до байтів → `409`, підмінений ключ у presigned → `403`, PUT байтів → commit `200`, повторний commit `200`; `GET /files/{id}` → `302` і ті самі байти, чужому `403`, без токена `401`; розмір не збігся → `409`; multipart: 2 з 3 частин → `parts` бачить `[1,2]` і дає URL лише на `[3]`, HeadObject до complete — нічого, commit `409`, після третьої частини complete `200` з ETag `-3`; magic bytes: HTML під `image/png` → commit `409` і файл лишається `pending`, справжній PDF і непрозорий `octet-stream` проходять; ассети: прямий GET у бакет `403`, edge `MISS` → `HIT` з `immutable`, `HEAD` — ті самі заголовки без тіла, `POST` → `405`, новий вміст — нове імʼя; LRU за обсягом: при ліміті 2500 байт із трьох обʼєктів по 1000 витісняється найдавніше читаний, обʼєкт на 4000 не кешується (ДЗ #26) |
 | `test/e2e/auth.e2e-spec.ts` | логін ES256 (`kid`, `alg`), `401` на пароль/без токена/зіпсований; keyring із двох `kid`: токен другого ключа проходить, невідомий `kid` — `401`; логаут як дві дії (`access_denylist` + сімʼя); повторне використання refresh валить сімʼю разом із чесним клієнтом; `401` ≠ `403` на власності, ролі, чужому `user_id`/`seller_id` і підробленому payload; список замовлень лише своїх, адмін бачить усі (ДЗ #24) |
 | `test/e2e/orders.e2e-spec.ts` | створити товар → оформити замовлення → прочитати обидва → повтор з тим самим `Idempotency-Key`; `400` без ключа, `404` на невідоме замовлення, `409` при нестачі товару, `422` на той самий ключ з іншим тілом; relay усередині API виносить `order.placed` рівно один раз, повтор за ключем — не публікує (ДЗ #19, #22) |
 | `test/e2e/realtime.e2e-spec.ts` | життєвий цикл статусів і `409`; SSE: `Last-Event-ID`, `400`/`403`/`404` для не-власника, нумерація після рестарту; WS: кімнати, `forbidden`/`unauthenticated` (ДЗ #18) |
@@ -1638,6 +1639,13 @@ MinIO зі стенда (`marketplace` / `marketplace_dev`) не секрет, �
   тоді `status = completed`, `etag` з відповіді сховища. Без цього клієнт «закомітив» би те, чого не заливав, —
   у демо це `commit-without-bytes=409`. Для multipart commit спершу перевіряє, що частин рівно стільки, скільки
   порахував план, і робить `CompleteMultipartUpload`; завершити «половину» не можна — `409`.
+- **тип — не зі слів клієнта**: `content_type` в intent і заголовок `Content-Type` на PUT пише клієнт, тому
+  commit читає перші 256 байт обʼєкта (`GetObject` з `Range: bytes=0-255`) і звіряє magic bytes із заявленим
+  типом (`matchesContentType` у `src/files/upload-policy.ts`): JPEG `FF D8 FF`, PNG `89 50 4E 47 0D 0A 1A 0A`,
+  WebP `RIFF….WEBP`, PDF `%PDF-`. HTML під виглядом `image/png` заливається (сховище вмісту не перевіряє), але
+  commit відповідає `409`, рядок лишається `pending`, файл не віддається, а обʼєкт прибере `npm run prune` — у
+  демо це `disguised-put=200`, `commit-wrong-type=409`. `application/octet-stream` сигнатури не має за
+  визначенням: це непрозорі байти (дампи), які віддаються лише на завантаження.
 - **віддача** приватного файла — `GET /files/{id}` → `302` на presigned GET. Presigned не можна відкликати (ні
   `jti`, ні реєстру — з чотирьох стратегій ДЗ #24 працює лише короткий строк), тому в лист чи в UI іде не URL,
   а посилання на наш ендпоїнт: гард перевіряє власника на кожен запит, URL живе хвилину. У лог іде `file_id` і
@@ -1671,12 +1679,17 @@ MinIO зі стенда (`marketplace` / `marketplace_dev`) не секрет, �
 
 ### CDN перед сховищем, сховище закрите
 
-Обрана форма — **локальний edge** (`src/files/edge.ts`, `npm run edge`): кілька десятків рядків `node:http`,
-які беруть обʼєкт зі сховища власними креденшелами SDK, кладуть у памʼять і віддають із `X-Cache: HIT|MISS`.
+Обрана форма — **локальний edge** (`src/files/edge.ts`, `npm run edge`): невеликий сервер на `node:http`,
+який бере обʼєкт зі сховища власними креденшелами SDK, кладе в памʼять і віддає з `X-Cache: HIT|MISS`.
 Це і є суть OAC: до бакета ходить кеш, а не публіка. Бакет приватний (MinIO за замовчуванням: анонімний GET —
 `403 AccessDenied`, `direct=403`), кеш читається анонімно. Edge кешує лише те, що origin дозволив кешувати:
 без `Cache-Control` з `max-age` обʼєкт віддається, але не запамʼятовується — тому заголовок ставиться на
-обʼєкт при завантаженні (`publishAsset`), а не в edge.
+обʼєкт при завантаженні (`publishAsset`), а не в edge. Обслуговуються `GET` і `HEAD` (той самий шлях через кеш,
+ті самі заголовки з `Content-Length`, без тіла — `curl -I` і перевірки балансувальника працюють), решта
+методів — `405` з `Allow: GET, HEAD`. Кеш обмежений **обсягом**, а не кількістю записів: LRU на
+`EDGE_CACHE_MAX_BYTES` (дефолт 64 МіБ) — читання пересуває запис у «свіжі», при переповненні витісняються
+найдавніше читані, а обʼєкт, більший за весь ліміт, віддається, але не кешується. Без межі immutable-ассети з
+річним `max-age` накопичувалися б у памʼяті процесу до OOM.
 
 Справжня форма — CloudFront + Origin Access Control. Bucket policy для AWS-варіанту (Block Public Access
 увімкнено, читати може лише сервіс CloudFront, і лише з **нашої** дистрибуції — без `Condition` з
@@ -1743,9 +1756,9 @@ URL; старий запис у кеші нікому не заважає і д�
 
 | Демо | Вивід |
 | --- | --- |
-| `demo:upload` | `intent=200 intent-replay=1 key-from-server=1 api-alive=0 put-offline=200 commit=200 size-match=1 commit-without-bytes=409 tampered=403 expired=403 download=302 download-bytes-match=1` |
+| `demo:upload` | `intent=200 intent-replay=1 key-from-server=1 api-alive=0 put-offline=200 commit=200 size-match=1 commit-without-bytes=409 disguised-put=200 commit-wrong-type=409 tampered=403 expired=403 download=302 download-bytes-match=1` |
 | `demo:multipart` | `stale-uploads-aborted=0 intent=200 part-size=5242880 parts-planned=3 crash-signal=1 parts-after-crash=2 head-before-complete=404 resumed-parts=1 complete=200 size-match=1 etag-multipart=1 etag-is-md5=0` |
-| `demo:cdn` | `direct=403 edge-miss=200 edge-hit=200 cache-hit=1 immutable-cache-control=1 new-name=1 new-url=200 content-changed=1 old-url-still-hit=1 invalidations=0` |
+| `demo:cdn` | `direct=403 edge-miss=200 edge-hit=200 cache-hit=1 edge-head=200 head-headers-only=1 edge-post=405 immutable-cache-control=1 new-name=1 new-url=200 content-changed=1 old-url-still-hit=1 invalidations=0` |
 
 Формула одна на всі три механізми: коли скасувати дію дорого або неможливо, зроби так, щоб скасування було не
 потрібне. Presigned не відкликається — тому короткий. Запис у CDN не дістати — тому URL версійний. Обрив не

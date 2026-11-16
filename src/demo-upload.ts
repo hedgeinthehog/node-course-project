@@ -13,6 +13,7 @@ import { bootApi } from './redis/demo-api';
 
 const SIZE = 64 * 1024;
 const CONTENT_TYPE = 'image/png';
+const PNG_SIGNATURE = Buffer.from('\x89PNG\r\n\x1a\n', 'latin1');
 
 async function main() {
   const storage = Storage.fromEnv();
@@ -20,6 +21,9 @@ async function main() {
   const dataSource = await new DataSource(dataSourceOptions).initialize();
   const buyer = await newAccount(dataSource, 'buyer');
   const bytes = Buffer.alloc(SIZE, 0x42);
+  PNG_SIGNATURE.copy(bytes);
+  const html = Buffer.alloc(SIZE, ' ');
+  html.write('<html><script>alert(1)</script></html>');
 
   let api = await bootApi();
   const token: string = (await login(api.url, buyer)).body.access_token;
@@ -57,6 +61,21 @@ async function main() {
     },
     headers: { 'idempotency-key': randomUUID() },
   });
+  const disguised = await call(api.url, 'POST', '/uploads/intent', {
+    token,
+    body: {
+      filename: 'not-a-picture.png',
+      content_type: CONTENT_TYPE,
+      size: SIZE,
+    },
+    headers: { 'idempotency-key': randomUUID() },
+  });
+  const disguisedPut = await fetch(disguised.body.upload.url, {
+    method: 'PUT',
+    headers: { 'content-type': CONTENT_TYPE },
+    body: html,
+  });
+  await disguisedPut.text();
 
   const url: string = plan.upload.url;
   const tampered = await fetch(url.replace(/[0-9a-f-]{36}\.png/, 'evil.png'), {
@@ -96,6 +115,12 @@ async function main() {
     `/uploads/${empty.body.file_id}/commit`,
     { token },
   );
+  const commitWrongType = await call(
+    api.url,
+    'POST',
+    `/uploads/${disguised.body.file_id}/commit`,
+    { token },
+  );
   const download = await fetch(`${api.url}/files/${plan.file_id}`, {
     headers: { authorization: `Bearer ${token}` },
     redirect: 'manual',
@@ -127,6 +152,8 @@ async function main() {
     commit: commit.status,
     'size-match': commit.body?.size === SIZE ? 1 : 0,
     'commit-without-bytes': commitWithoutBytes.status,
+    'disguised-put': disguisedPut.status,
+    'commit-wrong-type': commitWrongType.status,
     tampered: tampered.status,
     expired: expired.status,
     download: download.status,
@@ -140,9 +167,11 @@ async function main() {
       commit.status === 200 &&
       commitWithoutBytes.status >= 400 &&
       commitWithoutBytes.status < 500 &&
+      disguisedPut.status === 200 &&
+      commitWrongType.status === 409 &&
       tampered.status === 403 &&
       expired.status === 403,
-    'bytes reached the bucket while the API was down; commit checked the object; tampered and expired URLs were refused',
+    'bytes reached the bucket while the API was down; commit checked the object and its magic bytes; tampered and expired URLs were refused',
   );
 }
 
