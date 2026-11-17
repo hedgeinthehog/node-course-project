@@ -123,6 +123,7 @@ const minio = new BackingService(
     env: [
       { name: 'MINIO_ROOT_USER', value: vault.STORAGE_ACCESS_KEY },
       fromSecret('MINIO_ROOT_PASSWORD', 'STORAGE_SECRET_KEY'),
+      { name: 'MINIO_SKIP_CLIENT', value: 'yes' },
     ],
     readinessProbe: {
       httpGet: { path: '/minio/health/live', port: 9000 },
