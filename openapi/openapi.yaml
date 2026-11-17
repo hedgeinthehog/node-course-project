@@ -34,6 +34,46 @@ tags:
       short-lived download links. The API authorizes and records; it is never in the data path.
 
 paths:
+  /healthz:
+    get:
+      tags: [health]
+      operationId: getLiveness
+      summary: Liveness probe — the process is alive (no dependencies are checked)
+      responses:
+        '200':
+          description: The process answers; restart it only if this stops being true.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeStatus'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+
+  /readyz:
+    get:
+      tags: [health]
+      operationId: getReadiness
+      summary: Readiness probe — safe to route traffic here
+      description: >-
+        Green only when the database answers and the instance is not draining. After SIGTERM it turns red
+        first and the socket closes only after the drain period, so the balancer stops sending traffic
+        before connections are refused.
+      responses:
+        '200':
+          description: Ready for traffic.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeStatus'
+        '503':
+          description: Not ready — the database is unreachable or the instance is draining.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+
   /health:
     get:
       tags: [health]
@@ -802,6 +842,13 @@ components:
             $ref: '#/components/schemas/Problem'
 
   schemas:
+    ProbeStatus:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, ready]
     Health:
       type: object
       additionalProperties: false

@@ -70,25 +70,27 @@ PORT=8080 npm start
 | Змінна | Обовʼязкова | Дефолт | Призначення | Джерело |
 | --- | --- | --- | --- | --- |
 | `NODE_ENV` | ні | `development` | режим: `development` / `test` / `production` | `.env` (dev) / env оточення (prod) |
+| `STARTUP_DELAY_MS` | ні | `0` | прогрів перед `listen()`, мс; у кластері `4000` — модель сервісу з міграціями й пулом (ДЗ #28) | `.env` (dev) / маніфест Deployment (кластер) |
+| `SHUTDOWN_DRAIN_MS` | ні | `0` | на SIGTERM: скільки `/readyz` червоний до закриття сокета, мс; у кластері `5000`, менше за `terminationGracePeriodSeconds` | `.env` (dev) / маніфест Deployment (кластер) |
 | `PORT` | ні | `3000` | HTTP-порт API | `.env` (dev) / env оточення (prod) |
-| `DB_URL` | так | — | URL **PgBouncer** (не Postgres напряму) **без облікових даних**, напр. `postgres://localhost:6432/marketplace` | сховище: локальний `.env` поза git (dev), env оточення платформи (prod) |
-| `DB_PASSWORD_FILE` | так | — | шлях до файла-секрета формату `user:password`, напр. `secrets/db_password` | сховище: файл-секрет поза git, ротується `rotate.sh`; шаблон — `secrets/db_password.example` |
+| `DB_URL` | так | — | URL **PgBouncer** (не Postgres напряму) **без облікових даних**, напр. `postgres://localhost:6432/marketplace` | конфіг оточення: локальний `.env` поза git (dev), env платформи (prod) |
+| `DB_PASSWORD_FILE` | так | — | шлях до файла-секрета формату `user:password`, напр. `secrets/db_password` | файл-секрет поза git (його вміст — пароль `DB_PASSWORD`), ротується `rotate.sh`; шаблон — `secrets/db_password.example` |
 | `BROKER_URL` | так | — | AMQP-URL RabbitMQ **з обліковими даними**, напр. `amqp://marketplace:marketplace_dev@localhost:5672`; читають API (публікація `order.placed`), споживач і демо ДЗ #19 | сховище: локальний `.env` поза git (dev), env оточення платформи (prod); у `.env.example` — дев-користувач стенда, він не секрет |
-| `REDIS_URL` | так | — | кеш-інстанс Redis (`allkeys-lru`), напр. `redis://localhost:6379`; картки товарів і локи | сховище: локальний `.env` поза git (dev), env оточення платформи (prod) |
-| `REDIS_QUEUE_URL` | так | — | Redis під стан (`noeviction` + AOF), напр. `redis://localhost:6382`; черга BullMQ, сесії, лічильники ліміту | сховище: те саме |
+| `REDIS_URL` | так | — | кеш-інстанс Redis (`allkeys-lru`), напр. `redis://localhost:6379`; картки товарів і локи | конфіг оточення: локальний `.env` поза git (dev), env платформи (prod) |
+| `REDIS_QUEUE_URL` | так | — | Redis під стан (`noeviction` + AOF), напр. `redis://localhost:6382`; черга BullMQ, сесії, лічильники ліміту | конфіг оточення: те саме |
 | `RATE_LIMIT` | ні | `100` | скільки запитів клієнта пропускає ковзне вікно | `.env` (dev) / env оточення (prod) |
 | `RATE_LIMIT_WINDOW_MS` | ні | `10000` | довжина ковзного вікна ліміту, мс | `.env` (dev) / env оточення (prod) |
-| `JWT_KID` | так | — | `kid` ключа підпису access-токенів (ДЗ #24); має бути серед `JWT_PUBLIC_KEYS` | сховище: локальний `.env` поза git (dev), env оточення платформи (prod) |
-| `JWT_PRIVATE_KEY` | так | — | base64 від PEM PKCS#8 приватного ключа ES256 | сховище: те саме; дев-пару генерує `node scripts/jwt-keys.mjs >> .env` |
-| `JWT_PUBLIC_KEYS` | так | — | keyring для перевірки підпису: `kid:base64` від PEM SPKI через кому, напр. `2026-11:MFkw…,2026-05:MFkw…`; під час ротації — старий і новий ключ разом | сховище: те саме |
-| `REFRESH_TOKEN_PEPPER` | так | — | HMAC-«перець» для хешів refresh-токенів, ≥ 16 байт | сховище: те саме |
-| `STORAGE_ENDPOINT` | ні | — (порожньо = AWS S3) | адреса S3-сумісного сховища, напр. `http://localhost:9000` (MinIO зі стенда); задана → `forcePathStyle` | `.env` (dev) / env оточення (prod) |
+| `JWT_KID` | так | — | `kid` ключа підпису access-токенів (ДЗ #24); має бути серед `JWT_PUBLIC_KEYS` | конфіг оточення: локальний `.env` поза git (dev), env платформи (prod) |
+| `JWT_PRIVATE_KEY` | так | — | base64 від PEM PKCS#8 приватного ключа ES256 | сховище: локальний `.env` поза git (dev), env оточення платформи (prod); дев-пару генерує `node scripts/jwt-keys.mjs >> .env` |
+| `JWT_PUBLIC_KEYS` | так | — | keyring для перевірки підпису: `kid:base64` від PEM SPKI через кому, напр. `2026-11:MFkw…,2026-05:MFkw…`; під час ротації — старий і новий ключ разом | конфіг оточення: поруч із приватним ключем, сам не секрет |
+| `REFRESH_TOKEN_PEPPER` | так | — | HMAC-«перець» для хешів refresh-токенів, ≥ 16 байт | сховище: локальний `.env` поза git (dev), env оточення платформи (prod) |
+| `STORAGE_ENDPOINT` | ні | — (порожньо = AWS S3) | адреса S3-сумісного сервісу, напр. `http://localhost:9000` (MinIO зі стенда); задана → `forcePathStyle` | `.env` (dev) / env оточення (prod) |
 | `STORAGE_REGION` | ні | `us-east-1` | регіон для підпису SigV4 (MinIO байдуже, AWS потребує регіон бакета) | `.env` (dev) / env оточення (prod) |
-| `STORAGE_ACCESS_KEY` | так | — | ключ доступу до сховища (ДЗ #26) | сховище: локальний `.env` поза git (dev), env оточення платформи (prod); у `.env.example` — дев-користувач MinIO зі стенда, він не секрет |
-| `STORAGE_SECRET_KEY` | так | — | секрет ключа доступу; право читати й писати **всі** файли бакета | сховище: те саме |
+| `STORAGE_ACCESS_KEY` | так | — | ідентифікатор ключа доступу до бакета (ДЗ #26) | конфіг оточення: локальний `.env` поза git (dev), env платформи (prod); у `.env.example` — дев-користувач MinIO зі стенда, він не секрет |
+| `STORAGE_SECRET_KEY` | так | — | секрет ключа доступу; право читати й писати **всі** файли бакета | сховище: локальний `.env` поза git (dev), env оточення платформи (prod) |
 | `STORAGE_BUCKET` | так | — | приватний бакет для завантажень і хешованих публічних ассетів, напр. `marketplace-files`; створює `npm run storage:init` | `.env` (dev) / env оточення (prod) |
-| `PACT_BROKER_URL` | ні | — | адреса Pact Broker для контрактних тестів (`http://127.0.0.1:9292` для compose); застосунок її не використовує, читає лише тестовий код | сховище: локальний `.env` поза git (dev), secrets GitHub (CI) |
-| `PACT_BROKER_TOKEN` | ні | — | bearer-токен брокера; для локального compose-брокера порожній | сховище: локальний `.env` поза git (dev), secrets GitHub (CI) |
+| `PACT_BROKER_URL` | ні | — | адреса Pact Broker для контрактних тестів (`http://127.0.0.1:9292` для compose); застосунок її не використовує, читає лише тестовий код | локальний `.env` поза git (dev), secrets GitHub (CI) |
+| `PACT_BROKER_TOKEN` | ні | — | bearer-токен брокера; для локального compose-брокера порожній | локальний `.env` поза git (dev), secrets GitHub (CI) |
 
 Контракт змінних — `.env.example` (у git). Реальний `.env` і тека `secrets/` — у `.gitignore`
 та `.dockerignore`, у docker-образ вони не потрапляють.
@@ -167,8 +169,11 @@ git status --ignored --porcelain | grep -E '^!! .*\.env$'; git ls-files | grep -
 Секрет не в образі:
 
 ```bash
-docker build -t myapp . && docker run --rm myapp ls -a /app && docker run --rm myapp sh -c 'cat /app/.env' 2>&1; docker inspect --format '{{.Config.Env}}' myapp
+printf 'dummy-npm-token' > .npm_token && npm run image:build && npm run demo:image; docker inspect --format '{{.Config.Env}}' marketplace-api:local
 ```
+
+З ДЗ #28 образ збирається з `docker/Dockerfile` і не має shell (`docker run … sh` дає `exec: "sh": executable file not
+found`), тому вміст перевіряє `demo:image`: розпаковує `docker save` і шукає секрет збірки в шарах, історії й конфігу.
 
 ## Що є в контракті
 
@@ -178,6 +183,7 @@ docker build -t myapp . && docker run --rm myapp ls -a /app && docker run --rm m
 | `/orders` | `GET /orders` (cursor-пагінація), `POST /orders` (Idempotency-Key), `GET /orders/{id}`, `PATCH /orders/{id}/status` (життєвий цикл), `GET /orders/{id}/events` (SSE) |
 | `/sessions` | `POST /sessions` (сесія в Redis для `sub` токена), `GET /sessions/me` (`X-Session-Id`, читання подовжує TTL) — ДЗ #23 |
 | `/auth` | `POST /auth/login`, `POST /auth/refresh` (ротація з детекцією повтору), `POST /auth/logout` — ДЗ #24; усі операції, крім `/health`, `GET /products*` і `login`/`refresh`, під `bearerAuth` |
+| `/healthz`, `/readyz` | проби ДЗ #28: `GET /healthz` — процес живий (залежності не перевіряються), `GET /readyz` — можна слати трафік (база відповідає і процес не в дренажі); `/health` лишився як зведена перевірка |
 | `/uploads`, `/files` | `POST /uploads/intent` (Idempotency-Key, presigned PUT або multipart-план), `GET /uploads/{id}/parts` (ListParts + URL лише на відсутні частини), `POST /uploads/{id}/commit` (HeadObject, звірка розміру), `GET /files/{id}` → `302` на presigned GET на 60 с — ДЗ #26 |
 
 - **Cursor-пагінація**: `?limit=&cursor=`, відповідь `{ items, next_cursor }`, `next_cursor: null` — сторінок більше немає. Курсор — непрозорий токен.
@@ -681,6 +687,7 @@ compose для перших чотирьох команд не потрібен.
 | `outbox.int-spec.ts` | замовлення і рядок outbox одним COMMIT; падіння після вставки в outbox відкочує обидва; ключ ідемпотентності: replay, `422` на інше тіло, пʼять паралельних запитів з одним ключем → одне замовлення, невдалий запит ключа не лишає; relay публікує по порядку і позначає `published_at`; publish, що падає завжди → backoff, після пʼяти спроб подія в DLQ і `failed_at`; падіння relay між publish і UPDATE → подія вдруге, ефект один, inbox з однією позначкою (ДЗ #22) |
 | `redis.int-spec.ts` | 30 одночасних промахів → один виклик loader-а, TTL із джитером, лок не знімає чужий токен, 25 промахів на відсутній id → один виклик і негативний кеш; сесія подовжує TTL на читанні; ліміт спільний для двох екземплярів і точний під 50 паралельними запитами; черга дедуплікує за `jobId` і доводить падучу задачу до `completed` за три спроби (ДЗ #23) |
 | `test/e2e/redis.e2e-spec.ts` | картка товару з кешу з TTL 295–360 с, інвалідація після замовлення; `POST /sessions` → `GET /sessions/me` і будь-який запит із `X-Session-Id` подовжують TTL, `401` на невідомий id; `429` problem+json із `Retry-After` після ліміту, `/health` поза лімітом (ДЗ #23) |
+| `test/e2e/probes.e2e-spec.ts` | `/healthz` і `/readyz` зелені; після початку дренажу `/readyz` → `503`, `/healthz` лишається `200` (ДЗ #28) |
 | `test/e2e/files.e2e-spec.ts` | intent: ключ `uploads/{userId}/{uuid}.png` без слідів `filename`, replay за Idempotency-Key, `400` на тип поза allowlist; commit до байтів → `409`, підмінений ключ у presigned → `403`, PUT байтів → commit `200`, повторний commit `200`; `GET /files/{id}` → `302` і ті самі байти, чужому `403`, без токена `401`; розмір не збігся → `409`; multipart: 2 з 3 частин → `parts` бачить `[1,2]` і дає URL лише на `[3]`, HeadObject до complete — нічого, commit `409`, після третьої частини complete `200` з ETag `-3`; magic bytes: HTML під `image/png` → commit `409` і файл лишається `pending`, справжній PDF і непрозорий `octet-stream` проходять; ассети: прямий GET у бакет `403`, edge `MISS` → `HIT` з `immutable`, `HEAD` — ті самі заголовки без тіла, `POST` → `405`, новий вміст — нове імʼя; LRU за обсягом: при ліміті 2500 байт із трьох обʼєктів по 1000 витісняється найдавніше читаний, обʼєкт на 4000 не кешується (ДЗ #26) |
 | `test/e2e/auth.e2e-spec.ts` | логін ES256 (`kid`, `alg`), `401` на пароль/без токена/зіпсований; keyring із двох `kid`: токен другого ключа проходить, невідомий `kid` — `401`; логаут як дві дії (`access_denylist` + сімʼя); повторне використання refresh валить сімʼю разом із чесним клієнтом; `401` ≠ `403` на власності, ролі, чужому `user_id`/`seller_id` і підробленому payload; список замовлень лише своїх, адмін бачить усі (ДЗ #24) |
 | `test/e2e/orders.e2e-spec.ts` | створити товар → оформити замовлення → прочитати обидва → повтор з тим самим `Idempotency-Key`; `400` без ключа, `404` на невідоме замовлення, `409` при нестачі товару, `422` на той самий ключ з іншим тілом; relay усередині API виносить `order.placed` рівно один раз, повтор за ключем — не публікує (ДЗ #19, #22) |
@@ -711,8 +718,8 @@ interactions з provider states — `GET /orders/1` (`order 1 exists`), `GET /or
 | Як запущено | Що відбувається |
 | --- | --- |
 | `npm run verify:provider` | `PACT_BROKER_URL` не задано → верифікується локальний `pacts/*.json`, нічого не публікується |
-| `bash scripts/with-secrets.sh dev npm run verify:provider` | **основний шлях**: обгортка бере `PACT_BROKER_URL` / `PACT_BROKER_TOKEN` зі сховища ДЗ #11 (локальний `.env`), контракт береться з брокера, результат публікується (`publishVerificationResult: true`) |
-| `PACT_BROKER_URL=http://127.0.0.1:9292 npm run verify:provider` | **аварійна форма для грейдера** без доступу до сховища; під `SKIP_VAULT=1` обгортка виконує рівно її |
+| `bash scripts/with-secrets.sh dev npm run verify:provider` | **основний шлях**: обгортка бере `PACT_BROKER_URL` / `PACT_BROKER_TOKEN` з локального `.env` (ДЗ #11), контракт береться з брокера, результат публікується (`publishVerificationResult: true`) |
+| `PACT_BROKER_URL=http://127.0.0.1:9292 npm run verify:provider` | **аварійна форма для грейдера** без доступу до секретів; під `SKIP_VAULT=1` обгортка виконує рівно її |
 
 Версія провайдера — `PACT_VERSION`, а якщо її немає — `git rev-parse --short HEAD`; поза git-чекаутом і без
 `PACT_VERSION` і `verify:provider` у режимі брокера, і `scripts/pact-broker.sh` зупиняються з поясненням.
@@ -761,7 +768,9 @@ curl -s "$PACT_BROKER_URL/can-i-deploy?pacticipant=marketplace-web&version=$VERS
 
 `.github/workflows/ci.yml`: job `db` — compose-стенд (Postgres, PgBouncer, RabbitMQ, два Redis, MinIO), одноразова
 ES256-пара для прогону (`scripts/jwt-keys.mjs` → `$GITHUB_ENV`; справжній ключ — у сховищі), міграції, демо
-ДЗ #14, #19, #22, #23 і #24, бекап і drill; job `tests` — `test:integration` і `test:e2e`; job `contract` — pipeline контракту,
+ДЗ #14, #19, #22, #23 і #24, бекап і drill; job `tests` — `test:integration` і `test:e2e`; job `image` (ДЗ #28) —
+збірка `docker/Dockerfile` з BuildKit-секретом, `demo:image`, ворота сканера `npm run scan` з робочим порогом
+`SCAN_MAX=20` і `tsc --noEmit` Pulumi-програми; job `contract` — pipeline контракту,
 де кожен тег ставить крок деплою, а не крок перевірки:
 
 1. `test:contract` → публікація контракту (`scripts/pact-broker.sh publish`);
@@ -1435,8 +1444,8 @@ scheduled-runs=4
 | Змінна | Джерело | Навіщо | Формат |
 | --- | --- | --- | --- |
 | `JWT_PRIVATE_KEY` | сховище (#11) | підпис access-токенів | base64 від PEM PKCS#8, EC P-256 |
-| `JWT_PUBLIC_KEYS` | сховище (#11) | keyring для перевірки підпису | `kid:base64` від PEM SPKI через кому; один запис або два під час ротації |
-| `JWT_KID` | сховище (#11) | `kid` у заголовку токена: яким ключем підписано; має бути в keyring | рядок `[A-Za-z0-9_.-]+`, напр. `dev`, `2026-11` |
+| `JWT_PUBLIC_KEYS` | конфіг оточення, поруч із ключем | keyring для перевірки підпису | `kid:base64` від PEM SPKI через кому; один запис або два під час ротації |
+| `JWT_KID` | конфіг оточення, поруч із ключем | `kid` у заголовку токена: яким ключем підписано; має бути в keyring | рядок `[A-Za-z0-9_.-]+`, напр. `dev`, `2026-11` |
 | `REFRESH_TOKEN_PEPPER` | сховище (#11) | HMAC-«перець» для хешів refresh-токенів | випадковий рядок ≥ 16 байт |
 
 Дефолтів у схемі (`src/config/env.schema.ts`) немає — дефолт тут дорівнював би зашитому в код ключу. Схема
@@ -1450,7 +1459,7 @@ scheduled-runs=4
 | Оточення | `kid` | Відбиток |
 | --- | --- | --- |
 | dev (локальний `.env`) | `dev` | `8cb7:7580:6988:16c8:eacd:ce00:976b:739b` |
-| prod (сховище, env `prod`) | `prod-2026-11` | `4375:aa4d:99bd:6bb2:8ffd:f029:3d1a:93b7` |
+| prod (env `prod`) | `prod-2026-11` | `4375:aa4d:99bd:6bb2:8ffd:f029:3d1a:93b7` |
 
 Відбиток поточного ключа застосунок пише в лог на старті (`signing key kid=… fingerprint=…`) — це все, що
 про ключ взагалі може зʼявитись у логах: токени, їхні хвости й хеші в лог не пишуться, лише `jti`,
@@ -1608,7 +1617,7 @@ API вимкнено), `demo:multipart` (після обриву доливає�
 | --- | --- | --- | --- |
 | `STORAGE_ENDPOINT` | `.env` (dev) / env оточення (prod) | адреса емулятора; порожньо означає AWS S3 | `http://localhost:9000` |
 | `STORAGE_REGION` | `.env` / env оточення | регіон для SigV4 | `us-east-1` |
-| `STORAGE_ACCESS_KEY` | сховище секретів (#11): локальний `.env` поза git, env платформи у проді | ключ доступу | рядок |
+| `STORAGE_ACCESS_KEY` | конфіг оточення: локальний `.env` поза git, env платформи у проді | ідентифікатор ключа доступу | рядок |
 | `STORAGE_SECRET_KEY` | сховище секретів (#11) | секрет ключа — право читати й писати всі файли | рядок |
 | `STORAGE_BUCKET` | `.env` / env оточення | приватний бакет для `uploads/` і `assets/` | `marketplace-files` |
 
@@ -1764,6 +1773,144 @@ URL; старий запис у кеші нікому не заважає і д�
 потрібне. Presigned не відкликається — тому короткий. Запис у CDN не дістати — тому URL версійний. Обрив не
 попередити — тому завантаження відновлюване.
 
+## Kubernetes
+
+На ДЗ #5 питання було «чи запуститься образ», тут — «чи переживе він оновлення під навантаженням». Відповідь —
+число: `failed=0` з лічильника, який рахує коди відповідей із файла. Курсовий розгортається в локальний
+одновузловий кластер типізованою Pulumi-програмою (`infra/`), руками `kubectl apply` не виконується.
+
+### Змінні
+
+| Змінна | Джерело | Навіщо |
+| --- | --- | --- |
+| `DB_PASSWORD` | сховище (#11) | пароль ролі застосунку в Postgres; їде в K8s Secret (ключ `db_password` монтується файлом для `DB_PASSWORD_FILE`) |
+| `BROKER_URL` | сховище (#11) | AMQP-URL з користувачем і паролем брокера; у Secret їде той самий URL із хостом кластерного сервісу |
+| `JWT_PRIVATE_KEY` | сховище (#11) | приватний ключ підпису access-токенів |
+| `REFRESH_TOKEN_PEPPER` | сховище (#11) | HMAC-«перець» refresh-токенів |
+| `STORAGE_SECRET_KEY` | сховище (#11) | секрет ключа доступу до бакета |
+| `PULUMI_CONFIG_PASSPHRASE` | сховище (#11) | ключ шифрування стану Pulumi (секрети у стані лежать зашифрованими) |
+| `JWT_KID`, `JWT_PUBLIC_KEYS`, `STORAGE_ACCESS_KEY` | конфіг оточення, не секрети | `kid`, публічний keyring і ідентифікатор ключа доступу; їдуть у маніфест звичайними значеннями |
+| `PULUMI_BACKEND_URL` | оточення; дефолт `file://<repo>/.pulumi` | локальний файловий бекенд стану, без `pulumi login` |
+
+Значення приїжджають у програму через `scripts/with-secrets.sh` (`npm run up`, `npm run destroy`,
+`npm run demo:rollout`); під `SKIP_VAULT=1` обгортка виконує команду з уже заданим оточенням. Перша дія програми
+(`infra/vault.ts`) — валідація: без будь-якої зі змінних `pulumi preview` падає і називає її, до жодного звернення
+в кластер; дефолтів на кшталт `?? "changeme"` немає. Секретні значення загортаються в `pulumi.secret`, тож у
+стані вони зашифровані парольною фразою.
+
+### Образ
+
+`docker/Dockerfile` — три стадії: `deps` (продові залежності), `build` (усі залежності + `tsc`), фінальна —
+`gcr.io/distroless/nodejs22-debian12:nonroot`: без shell і пакетного менеджера, процес від uid `65532`. Сенс
+distroless не в розмірі, а в тому, чого бракує після RCE: `sh` в образі немає взагалі — `demo:image` перевіряє
+це запуском `docker run --entrypoint sh`, а не читанням Dockerfile, і uid бере з `process.getuid()` у
+контейнері. У маніфесті `runAsUser: 65532` числом: `USER nonroot` — імʼя, kubelet його не резолвить і з
+`runAsNonRoot: true` дає `CreateContainerConfigError`.
+
+Секрет етапу збірки (токен реєстру для `npm ci`) приходить лише через BuildKit:
+`RUN --mount=type=secret,id=npm_token,required=true` — файл існує тільки на час одного `RUN` і не стає ні шаром,
+ні метаданими. Приватного реєстру в проєкті немає, тому `.npm_token` — приманка: `demo:image` шукає її вміст у
+трьох місцях, бо жоден один інструмент не бачить обидва типові витоки. `ARG` осідає в `docker history` і конфігу
+образу, але не в шарах; `COPY` + `rm` наступним шаром лишає в історії нуль, а байти — у попередньому шарі
+(whiteout лише ховає файл), тому шари перевіряються розпакуванням `docker save`. `.npm_token` у `.gitignore` і
+`.dockerignore`. Секрет збірки захищає образ і не має доїхати до реєстру; секрет рантайму захищає репозиторій і
+не має доїхати до git — обидва потрібні, жоден не замінює іншого.
+
+`npm run scan` (`scripts/scan.mjs`) запускає Trivy (локальний бінарник, інакше образ `aquasec/trivy` через
+Docker), рахує у JSON-звіті виправні знахідки рівня `SCAN_SEVERITY` (дефолт `CRITICAL,HIGH`) і порівнює з
+`SCAN_MAX`: друкує `image=`, `severity=`, `found=`, `max-allowed=`, `gate=pass|fail`, код виходу відповідний.
+Вердикт обчислюється: `SCAN_MAX=-1` завжди червоний, `SCAN_MAX=99999` — зелений. Робочий поріг — `20`: на
+момент здачі знахідок 15 (7 — `libssl3` базового distroless, 8 — транзитивні npm-пакети `multer`, `fast-uri`,
+`body-parser`, `proxy-addr`), тобто поріг означає «не гірше, ніж сьогодні, із запасом на добове оновлення бази»
+і має знижуватись разом з оновленням залежностей. Той самий скрипт із тим самим порогом викликає CI (job
+`image`).
+
+### Кластер
+
+Підіймав на **kind** v0.33 (Kubernetes v1.37, один вузол), Docker Desktop із **7,65 ГіБ** памʼяті. Вузол kind з
+усім стеком усередині (три поди API, Postgres, Redis, RabbitMQ, MinIO) займає близько **1,7 ГіБ**; поруч живе
+compose-стенд попередніх ДЗ (близько 0,35 ГіБ), обидва вміщаються. minikube не ставив: kind стартує швидше й
+легший, а на 4 ГіБ minikube з його мінімумом `--memory 1800` уже не лишив би місця стенду.
+
+`npm run cluster:up` (`scripts/cluster-up.sh`) створює кластер із `k8s/kind-config.yaml` (NodePort `30080`
+проброшений на `127.0.0.1:30080`) і виконує `kind load docker-image` — образ, зібраний на хості, у кластері не
+існує, без цього кроку под висить в `ErrImagePull`. Після кожної перезбірки образу команду треба повторити.
+
+### Що описує програма
+
+`infra/index.ts`: Namespace `marketplace`, Secret `marketplace-secrets`, Deployment / Service (NodePort) /
+PodDisruptionBudget / HorizontalPodAutoscaler з імʼям `marketplace-api`, Job `marketplace-bootstrap` (міграції
+TypeORM → топологія брокера → бакет, трьома кроками того самого образу) і чотири залежності через
+`ComponentResource` `BackingService` (`infra/backing.ts`): Postgres, Redis, RabbitMQ, MinIO — по одній репліці з
+`emptyDir`, без них `/readyz` не мав би чого перевіряти. Це навмисно спрощена форма: один Redis на обидві ролі,
+без PgBouncer і без ротації ролей — дані в кластері одноразові. Споживач подій і воркер черги (той самий образ з
+іншою командою) у кластер не виїжджають — ДЗ про шлях трафіку API. Налаштування стеку (`replicas`, `minAvailable`,
+`nodePort`, `profile`, `rev`) — у `infra/Pulumi.yaml` з дефолтами; `pulumi config set` кладе перевизначення в
+`Pulumi.<stack>.yaml`, який у git не йде, бо містить сіль шифрування конкретної парольної фрази.
+
+**Проби — три, на різні шляхи.** `readinessProbe` → `/readyz` («чи можна слати трафік»: база відповідає і процес
+не в дренажі; період 1 с, один провал знімає под з ендпоінтів). `livenessProbe` → `/healthz` («чи треба мене
+вбити»: процес відповідає, залежності не перевіряються) — якби вона дивилась на `/readyz`, недоступна база
+перетворювалась би на нескінченні рестарти здорових процесів. `startupProbe` → `/healthz` з
+`failureThreshold: 60` × 1 с: поки вона не зелена, інші дві не працюють, тож застосунок має до **60 с** на старт;
+без неї liveness із періодом 10 с і трьома провалами вбила б повільний старт уже через **30 с**, а лікувати це
+більшим `initialDelaySeconds` означало б сповільнити виявлення зависання на весь час життя пода.
+
+**Стратегія, що дозволяє нуль.** `maxUnavailable: 0`, `maxSurge: 1` — старий под не знімається, поки новий не
+сказав «готовий». Прогрів перед `listen()` — 4 с (`STARTUP_DELAY_MS`, модель міграцій і пулу; без нього вимір
+порожній, бо застосунок стартує швидше, ніж встигає зламатись). На SIGTERM (`src/main.ts`) процес спершу робить
+`/readyz` червоним, тримає дренаж 5 с (`SHUTDOWN_DRAIN_MS`) і лише потім закриває сокет: `close()` одразу — це
+відмова новим зʼєднанням, поки ендпоінт ще в балансувальнику. `terminationGracePeriodSeconds: 30` більший за
+дренаж, інакше SIGKILL прийшов би посеред нього. Викочування запускає зміна шаблону пода, тому в ньому є змінна
+`REV` (`pulumi config set rev …`): перезбірка образу під тим самим тегом сама нічого не викотить.
+
+**PDB** — `minAvailable: 2` при трьох репліках: одне добровільне виселення дозволене, друге — ні.
+`minAvailable == replicas` блокував би будь-який `drain`, а PDB на одній репліці — самообман. Бюджет діє лише на
+Eviction API: `kubectl delete pod` його обходить.
+
+**HPA і `replicas`.** HPA — `autoscaling/v2`, `minReplicas: 3`, `maxReplicas: 6`, CPU 70 %. У kind немає
+metrics-server, тому `TARGETS` показує `cpu: <unknown>/70%` і HPA нічого не масштабує — саме тому
+`spec.replicas` у програмі лишається. У бойовому кластері з metrics-server це конфлікт володіння полем: у
+`replicas` пишуть і програма, і HPA. HPA підняв до пʼяти, наступний `pulumi up` бачить розбіжність зі своїм `3` і
+повертає три — посеред піку. Там `replicas` з програми прибирається (або ставиться `ignoreChanges:
+['spec.replicas']`), а нижню межу тримає `minReplicas`.
+
+**Секрет рантайму.** Значення зі сховища ДЗ #11 програма кладе в `Secret` полем `data` (base64, а не
+`stringData`: воно лише для запису, і провайдер бачив би різницю на кожному `up`); Deployment споживає його
+посиланнями `secretKeyRef` і томом із `db_password`, значень у маніфесті немає. Провайдер працює з
+`enableSecretMutable`: зміна секрету оновлює обʼєкт на місці, а не пересоздає його разом із Deployment; щоб поди
+перечитали значення, міняється `REV`. base64 — не шифрування: у локальному кластері Secret лежить в etcd
+відкритим текстом, тобто «поклав у Secret» означає «прибрав із git», а не «зашифрував». Промислові шляхи —
+**External Secrets Operator** (оператор синхронізує значення з Vault / AWS Secrets Manager у звичайний Secret і
+оновлює його за розкладом) або **Secrets Store CSI Driver** (секрет монтується в под томом прямо зі сховища і в
+etcd не потрапляє взагалі); тут оператор у кластер не ставиться.
+
+### Демо і числа
+
+- `npm run demo:image` — `stages`, `shell-inside`, `runtime-uid`, `token-in-history`, `token-in-config`,
+  `token-in-layers`.
+- `npm run demo:rollout` — запускає генератор навантаження (`scripts/load.mjs`: чотири воркери, нове зʼєднання
+  на кожен запит до `GET /health` через NodePort, код кожної відповіді рядком у тимчасовий файл; відсутність
+  відповіді — `000`), міняє `REV`, чекає кінця викочування і ще 10 с дренажу, рахує рядки файла й прибирає його.
+  `PROFILE=naive npm run demo:rollout` робить те саме на зламаному профілі (без проб, `maxUnavailable: 1`, без
+  дренажу) і повертає кластер у коректний.
+- `npm run demo:pdb` — два виселення поспіль через Eviction API (`kubectl proxy`, код відповіді HTTP), потім
+  чекає, поки Deployment знову повний.
+
+| Профіль | requests | ok | failed | rollout-seconds |
+| --- | --- | --- | --- | --- |
+| hardened | 6379 | 6379 | 0 | 19 |
+| hardened | 6504 | 6504 | 0 | 19 |
+| hardened | 6449 | 6449 | 0 | 19 |
+| naive | 5215 | 4611 | 604 | 5 |
+| naive | 5261 | 4646 | 615 | 4 |
+
+Нуль на коректному профілі відтворюється від прогону до прогону (ще чотири прогони на чистій збірці:
+`failed=0` на 5357–6836 запитах, викочування 19–30 с); зламаний втрачає приблизно кожен девʼятий
+запит усього виміру (усі втрати припадають на кілька секунд викочування) і викочується вчетверо швидше — це і є
+ціна нуля. `demo:image`: `stages=3 shell-inside=0 runtime-uid=65532 token-in-history=0 token-in-config=0
+token-in-layers=0`. `demo:pdb`: `healthy=3 minAvailable=2 evict-1=201 evict-2=429`.
+
 ## Grading
 
 ```bash
@@ -1864,6 +2011,59 @@ exit 1 і називає їх (критерій 3), `npm run start:vault` бер
 `REDIS_*` і ключі JWT з блоку вище; `demo:cdn` потребує лише `STORAGE_*`. Тип файла для multipart у демо —
 `application/octet-stream` на 11 МіБ, тому серія не навантажує диск емулятора; дані MinIO лежать у томі
 `miniodata`.
+
+### ДЗ #28: кластер
+
+Окремий блок, compose-стенд для нього не потрібен (потрібні Docker, `kind`, `kubectl`, `pulumi`, для
+`npm run scan` — `trivy` або доступ Docker до образу `aquasec/trivy`):
+
+```bash
+export SKIP_VAULT=1                    # у грейдера немає доступу до сховища
+export DB_PASSWORD=marketplace_dev
+export BROKER_URL=amqp://marketplace:marketplace_dev@127.0.0.1:5672
+export STORAGE_ACCESS_KEY=marketplace STORAGE_SECRET_KEY=marketplace_dev
+node -e 'const {generateKeyPairSync}=require("node:crypto");
+const k=generateKeyPairSync("ec",{namedCurve:"P-256",
+  privateKeyEncoding:{type:"pkcs8",format:"pem"},
+  publicKeyEncoding:{type:"spki",format:"pem"}});
+const fs=require("node:fs");
+fs.writeFileSync("/tmp/priv.b64",Buffer.from(k.privateKey).toString("base64"));
+fs.writeFileSync("/tmp/pub.b64",Buffer.from(k.publicKey).toString("base64"));'
+export JWT_KID=grader
+export JWT_PRIVATE_KEY="$(cat /tmp/priv.b64)"
+export JWT_PUBLIC_KEYS="grader:$(cat /tmp/pub.b64)"
+export REFRESH_TOKEN_PEPPER=grader-pepper-0123456789abcdef
+export PULUMI_BACKEND_URL="file://$PWD/.pulumi"
+export PULUMI_CONFIG_PASSPHRASE=hw28-grading
+npm --prefix infra ci
+printf 'dummy-npm-token' > .npm_token   # секрет етапу збірки; у git його немає
+npm run image:build                     # docker/Dockerfile -> marketplace-api:local
+npm run cluster:up                      # kind create cluster + kind load docker-image
+npm run up                              # pulumi up
+```
+
+Далі: `npm run demo:image`, `SCAN_MAX=-1 npm run scan`, `SCAN_MAX=99999 npm run scan`, `npm run demo:rollout`,
+`npm run demo:pdb`. Імена для критеріїв, що читають кластер (контекст `kind-marketplace` kind робить поточним
+сам):
+
+| Що | Значення |
+| --- | --- |
+| namespace | `marketplace` |
+| Deployment, Service, PDB, HPA | `marketplace-api` |
+| Secret | `marketplace-secrets` |
+| тека Pulumi-програми | `infra` |
+| адреса застосунку | `http://127.0.0.1:30080` |
+
+```bash
+kubectl -n marketplace get deploy marketplace-api -o json > /tmp/dep.json
+kubectl -n marketplace get pdb marketplace-api -o jsonpath='{.status.disruptionsAllowed}{"\n"}'
+kubectl -n marketplace get hpa marketplace-api -o json > /tmp/hpa.json
+kubectl -n marketplace get secret -o name | wc -l
+```
+
+Порт `30080` на `127.0.0.1` має бути вільний. Перший `npm run up` тягне в кластер образи залежностей
+(Postgres, Redis, RabbitMQ, MinIO) і триває близько хвилини; повторний — «unchanged». `demo:rollout` триває
+близько хвилини, `demo:pdb` — пів хвилини. Знести після перевірки: `npm run destroy && npm run cluster:down`.
 
 ## Перевірки
 

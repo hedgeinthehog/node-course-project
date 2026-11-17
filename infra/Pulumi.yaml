@@ -1,0 +1,15 @@
+name: marketplace
+description: Marketplace API on a local Kubernetes cluster — rolling updates that drop no requests
+runtime:
+  name: nodejs
+  options:
+    typescript: true
+config:
+  kubeContext: kind-marketplace
+  image: marketplace-api:local
+  replicas: 3
+  maxReplicas: 6
+  minAvailable: 2
+  nodePort: 30080
+  profile: hardened
+  rev: '1'

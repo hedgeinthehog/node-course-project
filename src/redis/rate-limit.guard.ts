@@ -9,6 +9,8 @@ import {
 import type { Request, Response } from 'express';
 import { RateLimiter } from './rate-limiter';
 
+const UNLIMITED = new Set(['/health', '/healthz', '/readyz']);
+
 @Injectable()
 export class RateLimitGuard implements CanActivate {
   private readonly logger = new Logger(RateLimitGuard.name);
@@ -18,7 +20,7 @@ export class RateLimitGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     if (context.getType() !== 'http') return true;
     const request = context.switchToHttp().getRequest<Request>();
-    if (request.path === '/health') return true;
+    if (UNLIMITED.has(request.path)) return true;
     const response = context.switchToHttp().getResponse<Response>();
     const client = `ip:${request.ip}`;
 
