@@ -1,5 +1,7 @@
 import { DataSource } from 'typeorm';
 import { dataSourceOptions } from './data-source';
+import { abandonPendingUploads } from './files/abandoned';
+import { Storage } from './files/storage';
 
 const RETENTION = [
   ['outbox', `published_at < now() - interval '7 days'`],
@@ -22,8 +24,10 @@ async function main() {
     );
     removed.set(table, (removed.get(table) ?? 0) + count);
   }
+  const files = await abandonPendingUploads(dataSource, Storage.fromEnv());
   await dataSource.destroy();
   for (const [table, count] of removed) console.log(`${table}=${count}`);
+  console.log(`files=${files}`);
 }
 
 main().catch((err) => {

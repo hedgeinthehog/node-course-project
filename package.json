@@ -48,6 +48,11 @@
     "demo:auth": "bash scripts/with-secrets.sh dev node dist/demo-auth.js",
     "demo:reuse": "bash scripts/with-secrets.sh dev node dist/demo-reuse.js",
     "demo:rbac": "bash scripts/with-secrets.sh dev node dist/demo-rbac.js",
+    "demo:upload": "bash scripts/with-secrets.sh dev node dist/demo-upload.js",
+    "demo:multipart": "bash scripts/with-secrets.sh dev node dist/demo-multipart.js",
+    "demo:cdn": "bash scripts/with-secrets.sh dev node dist/demo-cdn.js",
+    "storage:init": "bash scripts/with-secrets.sh dev node dist/storage-init.js",
+    "edge": "bash scripts/with-secrets.sh dev node dist/edge.js",
     "backup": "bash scripts/with-secrets.sh dev bash scripts/backup.sh",
     "restore:drill": "bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh",
     "test:integration": "node --experimental-vm-modules node_modules/jest/bin/jest.js --selectProjects integration",
@@ -56,6 +61,8 @@
     "verify:provider": "node --experimental-vm-modules node_modules/jest/bin/jest.js --selectProjects provider"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1162.0",
+    "@aws-sdk/s3-request-presigner": "^3.1162.0",
     "@nestjs/common": "^12.0.1",
     "@nestjs/config": "^12.0.0",
     "@nestjs/core": "^12.0.1",

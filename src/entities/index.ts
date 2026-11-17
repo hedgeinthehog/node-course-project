@@ -8,6 +8,7 @@ import { ProcessedMessage } from './processed-message.entity';
 import { RefreshToken } from './refresh-token.entity';
 import { Product } from './product.entity';
 import { Shipment } from './shipment.entity';
+import { StoredFile } from './stored-file.entity';
 import { Task } from './task.entity';
 import { User } from './user.entity';
 
@@ -24,4 +25,5 @@ export const entities = [
   IdempotencyKey,
   RefreshToken,
   AccessDenylistEntry,
+  StoredFile,
 ];
