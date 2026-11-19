@@ -13,11 +13,14 @@ import {
 import type { Response } from 'express';
 import type { Principal } from '../auth/auth.service';
 import { CurrentUser, Roles } from '../auth/decorators';
+import { layerLogger } from '../observability/logger';
 import { OrdersService } from './orders.service';
 import type { CreateOrderDto } from './dto/create-order.dto';
 import type { ChangeOrderStatusDto } from './dto/change-order-status.dto';
 import { OrderEventsService } from './order-events.service';
 import { OrderOwnerGuard } from './order-owner.guard';
+
+const log = layerLogger('orders.controller');
 
 @Controller('orders')
 export class OrdersController {
@@ -33,6 +36,7 @@ export class OrdersController {
     @Res({ passthrough: true }) res: Response,
     @CurrentUser() user: Principal,
   ) {
+    log.info({ items: dto.items.length }, 'order requested');
     const { result, replayed } = await this.ordersService.create(
       key,
       dto,

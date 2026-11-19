@@ -9,6 +9,7 @@ import { appOptions, configureApp } from '../app.setup';
 import { parseDbEnv } from '../config/db-env.schema';
 import { parseBrokerUrl } from '../config/env.schema';
 import { declareTopology } from '../events/topology';
+import { logger } from '../observability/logger';
 
 export interface RunningApi {
   url: string;
@@ -35,10 +36,11 @@ export async function bootApi(
   await declareTopology(await broker.createChannel());
   await broker.close();
   const { AppModule } = await import('../app.module.js');
-  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
-    ...appOptions,
-    logger: ['error', 'warn'],
-  });
+  logger.level = process.env.LOG_LEVEL ?? 'warn';
+  const app = await NestFactory.create<NestExpressApplication>(
+    AppModule,
+    appOptions,
+  );
   configureApp(app);
   await app.listen(0, '127.0.0.1');
   const { port } = app.getHttpServer().address() as AddressInfo;

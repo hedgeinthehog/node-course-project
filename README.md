@@ -65,7 +65,9 @@ PORT=8080 npm start
 Усі змінні описані однією zod-схемою у `src/config/env.schema.ts`. Схема виконується на старті
 через `validate` у `ConfigModule.forRoot`: зламана або відсутня змінна означає, що процес не стартує,
 у виводі — назва змінної та причина, exit code ≠ 0. У коді конфіг читається лише через
-`ConfigService<Env, true>`, прямих звернень до `process.env` немає.
+`ConfigService<Env, true>`, прямих звернень до `process.env` немає. Виняток — `src/observability/`: логер і OTel
+стартують раніше за `ConfigModule` (інакше автоінструментуванню нема що патчити), тому `LOG_LEVEL`, `OTEL_*`
+вони читають з оточення самі; схема ті самі змінні все одно валідує.
 
 | Змінна | Обовʼязкова | Дефолт | Призначення | Джерело |
 | --- | --- | --- | --- | --- |
@@ -89,6 +91,13 @@ PORT=8080 npm start
 | `STORAGE_ACCESS_KEY` | так | — | ідентифікатор ключа доступу до бакета (ДЗ #26) | конфіг оточення: локальний `.env` поза git (dev), env платформи (prod); у `.env.example` — дев-користувач MinIO зі стенда, він не секрет |
 | `STORAGE_SECRET_KEY` | так | — | секрет ключа доступу; право читати й писати **всі** файли бакета | сховище: локальний `.env` поза git (dev), env оточення платформи (prod) |
 | `STORAGE_BUCKET` | так | — | приватний бакет для завантажень і хешованих публічних ассетів, напр. `marketplace-files`; створює `npm run storage:init` | `.env` (dev) / env оточення (prod) |
+| `LOG_LEVEL` | ні | `info` (`silent` під `NODE_ENV=test`) | рівень JSON-логера pino | `.env` (dev) / env оточення (prod) |
+| `OTEL_SERVICE_NAME` | ні | `marketplace-api` | `service.name` на кожному спані | `.env` (dev) / env оточення (prod) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | ні | — | OTLP/HTTP-адреса приймача трейсів; порожня — спани створюються (у логах є `trace_id`), але нікуди не шлються | vault через `scripts/with-secrets.sh` / `.env` (dev) |
+| `PROMETHEUS_URL` | ні | — | адреса Prometheus стенда; застосунок її не читає, лише `demo:metrics` | vault через `scripts/with-secrets.sh` / `.env` (dev) |
+| `TRACE_API_URL` | ні | — | query-API беку трейсів (Jaeger); застосунок її не читає, лише `demo:trace` | vault через `scripts/with-secrets.sh` / `.env` (dev) |
+| `GRAFANA_USER` | ні | `admin` | адміністратор Grafana стенда (читає compose) | vault через `scripts/with-secrets.sh` / `.env` (dev) |
+| `GRAFANA_PASSWORD` | ні | `marketplace_dev` | його пароль; дев-значення compose секретом не є | vault через `scripts/with-secrets.sh` / `.env` (dev) |
 | `PACT_BROKER_URL` | ні | — | адреса Pact Broker для контрактних тестів (`http://127.0.0.1:9292` для compose); застосунок її не використовує, читає лише тестовий код | локальний `.env` поза git (dev), secrets GitHub (CI) |
 | `PACT_BROKER_TOKEN` | ні | — | bearer-токен брокера; для локального compose-брокера порожній | локальний `.env` поза git (dev), secrets GitHub (CI) |
 
@@ -181,6 +190,7 @@ found`), тому вміст перевіряє `demo:image`: розпакову
 | --- | --- |
 | `/products` | `GET /products` (cursor-пагінація), `POST /products` (Idempotency-Key), `GET /products/{id}` |
 | `/orders` | `GET /orders` (cursor-пагінація), `POST /orders` (Idempotency-Key), `GET /orders/{id}`, `PATCH /orders/{id}/status` (життєвий цикл), `GET /orders/{id}/events` (SSE) |
+| `/metrics` | `GET /metrics` — метрики RED у форматі Prometheus (ДЗ #29) |
 | `/sessions` | `POST /sessions` (сесія в Redis для `sub` токена), `GET /sessions/me` (`X-Session-Id`, читання подовжує TTL) — ДЗ #23 |
 | `/auth` | `POST /auth/login`, `POST /auth/refresh` (ротація з детекцією повтору), `POST /auth/logout` — ДЗ #24; усі операції, крім `/health`, `GET /products*` і `login`/`refresh`, під `bearerAuth` |
 | `/healthz`, `/readyz` | проби ДЗ #28: `GET /healthz` — процес живий (залежності не перевіряються), `GET /readyz` — можна слати трафік (база відповідає і процес не в дренажі); `/health` лишився як зведена перевірка |
@@ -688,6 +698,7 @@ compose для перших чотирьох команд не потрібен.
 | `redis.int-spec.ts` | 30 одночасних промахів → один виклик loader-а, TTL із джитером, лок не знімає чужий токен, 25 промахів на відсутній id → один виклик і негативний кеш; сесія подовжує TTL на читанні; ліміт спільний для двох екземплярів і точний під 50 паралельними запитами; черга дедуплікує за `jobId` і доводить падучу задачу до `completed` за три спроби (ДЗ #23) |
 | `test/e2e/redis.e2e-spec.ts` | картка товару з кешу з TTL 295–360 с, інвалідація після замовлення; `POST /sessions` → `GET /sessions/me` і будь-який запит із `X-Session-Id` подовжують TTL, `401` на невідомий id; `429` problem+json із `Retry-After` після ліміту, `/health` поза лімітом (ДЗ #23) |
 | `test/e2e/probes.e2e-spec.ts` | `/healthz` і `/readyz` зелені; після початку дренажу `/readyz` → `503`, `/healthz` лишається `200` (ДЗ #28) |
+| `test/e2e/observability.e2e-spec.ts` | `/metrics`: два запити з різними id збільшують один ряд із `route="/orders/:id"`, сирого шляху в лейблах немає, верхній бакет `30`; redact ховає `authorization` і `body.password`, а вкладений `profile.password` без описаного шляху лишає (ДЗ #29) |
 | `test/e2e/files.e2e-spec.ts` | intent: ключ `uploads/{userId}/{uuid}.png` без слідів `filename`, replay за Idempotency-Key, `400` на тип поза allowlist; commit до байтів → `409`, підмінений ключ у presigned → `403`, PUT байтів → commit `200`, повторний commit `200`; `GET /files/{id}` → `302` і ті самі байти, чужому `403`, без токена `401`; розмір не збігся → `409`; multipart: 2 з 3 частин → `parts` бачить `[1,2]` і дає URL лише на `[3]`, HeadObject до complete — нічого, commit `409`, після третьої частини complete `200` з ETag `-3`; magic bytes: HTML під `image/png` → commit `409` і файл лишається `pending`, справжній PDF і непрозорий `octet-stream` проходять; ассети: прямий GET у бакет `403`, edge `MISS` → `HIT` з `immutable`, `HEAD` — ті самі заголовки без тіла, `POST` → `405`, новий вміст — нове імʼя; LRU за обсягом: при ліміті 2500 байт із трьох обʼєктів по 1000 витісняється найдавніше читаний, обʼєкт на 4000 не кешується (ДЗ #26) |
 | `test/e2e/auth.e2e-spec.ts` | логін ES256 (`kid`, `alg`), `401` на пароль/без токена/зіпсований; keyring із двох `kid`: токен другого ключа проходить, невідомий `kid` — `401`; логаут як дві дії (`access_denylist` + сімʼя); повторне використання refresh валить сімʼю разом із чесним клієнтом; `401` ≠ `403` на власності, ролі, чужому `user_id`/`seller_id` і підробленому payload; список замовлень лише своїх, адмін бачить усі (ДЗ #24) |
 | `test/e2e/orders.e2e-spec.ts` | створити товар → оформити замовлення → прочитати обидва → повтор з тим самим `Idempotency-Key`; `400` без ключа, `404` на невідоме замовлення, `409` при нестачі товару, `422` на той самий ключ з іншим тілом; relay усередині API виносить `order.placed` рівно один раз, повтор за ключем — не публікує (ДЗ #19, #22) |
@@ -1916,10 +1927,138 @@ etcd не потрапляє взагалі); тут оператор у кла�
 ціна нуля. `demo:image`: `stages=3 shell-inside=0 runtime-uid=65532 token-in-history=0 token-in-config=0
 token-in-layers=0`. `demo:pdb`: `healthy=3 minAvailable=2 evict-1=201 evict-2=429`.
 
+## Observability
+
+Питання розділу: «о 03:15 один запит віддав 500 — скільки часу треба, щоб сказати, що саме сталося». Відповідь
+тримається на одному ключі: `trace_id` активного спана OpenTelemetry стоїть у кожному рядку логу, у спані в
+Jaeger і приходить від клієнта в `traceparent`. Ендпоїнт демо — оформлення замовлення `POST /orders`
+(ДЗ #14/#22).
+
+| Змінна | Хто читає | Значення стенда | Джерело |
+| --- | --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | застосунок (`src/observability/telemetry.ts`) | `http://127.0.0.1:22918` | vault через `scripts/with-secrets.sh` / `.env` (dev) |
+| `OTEL_SERVICE_NAME` | застосунок | `marketplace-api` (дефолт) | `.env` (dev) / env оточення (prod) |
+| `LOG_LEVEL` | застосунок (`src/observability/logger.ts`) | `info` (дефолт) | `.env` (dev) / env оточення (prod) |
+| `PROMETHEUS_URL` | `demo:metrics` | `http://127.0.0.1:22901` | vault через `scripts/with-secrets.sh` / `.env` (dev) |
+| `TRACE_API_URL` | `demo:trace` | `http://127.0.0.1:22904` | vault через `scripts/with-secrets.sh` / `.env` (dev) |
+| `GRAFANA_USER` / `GRAFANA_PASSWORD` | `observability/docker-compose.yml` | `admin` / `marketplace_dev` | vault через `scripts/with-secrets.sh` / `.env` (dev) |
+
+Нових env-файлів немає: значення лежать там само, де решта (Infisical, локально `.env`), демо отримують їх через
+обгортку, під `SKIP_VAULT=1` — з `export`.
+
+### Стенд
+
+`observability/docker-compose.yml`, порти з діапазону 22900–22999. `npm run obs:up` піднімає стенд через
+`scripts/with-secrets.sh`, тож логін і пароль Grafana приходять із vault; голий `docker compose … up` бере
+дев-дефолти. `npm run obs:down` зупиняє.
+
+| Сервіс | Образ | Порт хоста | Навіщо |
+| --- | --- | --- | --- |
+| Jaeger | `jaegertracing/jaeger:2.11.0` | `22918` (OTLP/HTTP), `22904` (UI і query-API) | приймач і сховок трейсів у памʼяті |
+| Prometheus | `prom/prometheus:v3.7.3` | `22901` | скрейпить `/metrics` застосунку на хості кожні 2 с (`observability/prometheus.yml`: порт `3000` і порт демо `22950`) |
+| Grafana | `grafana/grafana:12.3.0` | `22903` | дашборд із файла; датасорси Prometheus і Jaeger провіженяться з `observability/grafana/provisioning/` |
+
+Три окремі контейнери, а не `grafana/otel-lgtm`: стенд має жити поруч із кластером ДЗ #28 у 8 ГіБ VM Docker.
+`docker stats --no-stream`: сума всіх контейнерів до підняття стенда — 1351 МіБ, після — 1482 МіБ, тобто стенд
+на старті займає 131 МіБ (Grafana 100, Prometheus 18, Jaeger 14), після девʼяти прогонів демо — 185 МіБ
+(107 / 34 / 44); вузол kind з ДЗ #28 — ще 1,7 ГіБ, разом виходить менше половини VM. `up --wait` — 7 с на вже
+завантажених образах. Колектора між застосунком і Jaeger немає: Jaeger v2 сам приймає OTLP, зайва ланка для одного
+сервісу нічого не дає.
+
+### Логи
+
+- `src/observability/logger.ts` — один pino на процес, JSON у stdout, без `pino-pretty` і без файлів. Логер
+  Nest замінено адаптером на той самий pino (`appOptions.logger`), тому не-JSON рядків у stdout немає взагалі.
+- Корелятор — не власний uuid, а `trace.getActiveSpan()?.spanContext()` у `mixin`: кожен рядок отримує
+  `trace_id` і `span_id` активного спана. Жодна функція не приймає `req` заради логування: шар бере свій
+  `layerLogger('orders.repo')` (поле `layer`) і пише.
+- `user_id` (ДЗ #24), `tenant` і `idempotency_key` (ДЗ #22) живуть в `AsyncLocalStorage`
+  (`src/observability/request-context.ts`): middleware відкриває контекст на запит і кладе туди заголовки
+  `Idempotency-Key` та `X-Tenant-Id`, `AuthGuard` дописує користувача після перевірки токена. Колбек `finish`, у якому пишеться рядок запиту, привʼязаний до контексту
+  через `AsyncLocalStorage.bind` — інакше він виконувався б поза контекстом. Проєкт
+  однотенантний, тому `tenant` — лише мітка з заголовка клієнта для пошуку в логах (до 64 символів), доступів
+  вона не визначає.
+- Шари одного `POST /orders`: `http` (рядок запиту: метод, шаблон маршруту, статус, тривалість),
+  `orders.controller`, `orders.service`, `orders.repo`; відмова з 5xx дає рядок `http.problem` рівня `error` зі
+  стеком.
+- Redaction: `req.headers.authorization`, `req.headers.cookie`, `req.headers["x-session-id"]`,
+  `req.body.password`, `req.body.refresh_token` замінюються на `[REDACTED]`; тіла запитів `/auth/*` у лог не
+  кладуться зовсім. redact не вгадує шляхи — вкладений обʼєкт без описаного шляху не сховається (це фіксує
+  e2e-тест), тому нове чутливе поле означає новий рядок у `REDACTED_PATHS`.
+
+### Метрики RED
+
+`src/observability/metrics.ts` + middleware `src/observability/http.middleware.ts`, віддає `GET /metrics`
+(prom-client, окремий реєстр):
+
+- `http_requests_total{method, route, status}` — лічильник;
+- `http_request_duration_seconds{method, route, status}` — гістограма (Histogram, не Summary: квантилі між
+  інстансами агрегуються лише з бакетів).
+
+`route` — шаблон (`/orders/:id`) з `req.route.path`; запит, який відхилив валідатор OpenAPI ще до роутера, бере
+шаблон із метаданих валідатора, а шлях, якого немає взагалі, — єдине значення `unmatched`. Тому множина значень
+лейбла обмежена кількістю маршрутів, а не кількістю id. `/metrics`, `/health`, `/healthz`, `/readyz` не
+рахуються й не трасуються: проби кожну секунду втопили б і графік, і Jaeger.
+
+Межі бакетів, с: `0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30`. Звичайне замовлення вкладається в
+10–50 мс, тому внизу крок дрібний; найгірший випадок — запит, що чекає блокування рядка товару: у демо це 1,2 с,
+а в кластері довше 30 с запит не живе (`terminationGracePeriodSeconds: 30`, клієнти ДЗ #28 відвалюються за 2 с).
+Верхній скінченний `le=30` більший за це, тож `histogram_quantile` не впирається в межу, коли все погано.
+
+Дашборд — файл `observability/grafana/dashboards/marketplace-red.json` (uid `marketplace-red`,
+<http://127.0.0.1:22903>), три панелі на три питання RED, вікно `[1m]`:
+
+| Панель | Питання | PromQL |
+| --- | --- | --- |
+| Rate | скільки запитів за секунду бере кожен маршрут? | `sum by (method, route) (rate(http_requests_total[1m]))` |
+| Errors | яка частка відповідей — відмова сервера? | `sum by (method, route) (rate(http_requests_total{status=~"5.."}[1m])) / sum by (method, route) (rate(http_requests_total[1m]))` |
+| Duration | скільки триває запит разом із повільним хвостом? | `histogram_quantile(0.95, sum by (le, method, route) (rate(http_request_duration_seconds_bucket[1m])))` і так само p50, p99 |
+
+### Трейси
+
+`src/observability/telemetry.ts` — перший імпорт у `src/main.ts`, до застосунку: `NodeSDK` з
+автоінструментуванням `http` і `pg`. Вхідний `traceparent` продовжується (серверний спан стає дитиною спана
+клієнта), запити до бази — вкладені спани, відповідь 5xx ставить серверному спану статус `ERROR` (для 4xx OTel
+лишає `Unset`). Експорт — `BatchSpanProcessor` → OTLP/HTTP; на `SIGTERM` після `app.close()` викликається
+`sdk.shutdown()`, тому хвіст спанів не губиться. Без `OTEL_EXPORTER_OTLP_ENDPOINT` спани створюються, але не
+експортуються — `trace_id` у логах є завжди.
+
+### Демо і числа
+
+Кожне демо піднімає API окремим процесом на порту `22950` (`node dist/main.js`), читає його stdout, створює
+власних користувачів і товар, на старті прибирає залишки попереднього прогону (тригер відмови) і завершується з
+кодом ≠ 0, якщо інваріант порушено.
+
+- `npm run demo:logs` — одне замовлення зі своїм `traceparent`, потім вісім однакових паралельно, кожне зі своїм;
+  рядки логу групуються за `idempotency_key` і `trace_id`. `burst-mixed` — рядки, у яких `trace_id` не той, що
+  їхав із цим ключем. Секрети: `GET /orders` з `Authorization: Bearer <маркер>` і `POST /auth/login` з паролем
+  -маркером; у stdout шукаються обидва маркери, справжній access-токен і справжній пароль.
+- `npm run demo:metrics` — два скрейпи `/metrics` навколо 101 успішного і 10 невдалих `POST /orders`. Один з
+  успішних повільний: демо 1,2 с тримає `SELECT … FOR UPDATE` на рядку товару. Відмова справжня: демо вішає на
+  таблицю `orders` тригер, який відхиляє вставку для одного свого користувача, застосунок отримує помилку бази й
+  віддає `500`. Потім прогрів `GET /orders/:id` одним запитом і сто запитів за ста різними id.
+  `prometheus-agrees` (поза інваріантом) — Prometheus стенда нарахував стільки ж, скільки сам застосунок.
+- `npm run demo:trace` — те саме замовлення з відмовою і своїм `traceparent`; спани читаються з query-API Jaeger
+  (опитування до 20 с), рядок помилки — зі stdout застосунку. `orphan-spans` — спани, чий батько не в трейсі і
+  не є спаном із заголовка; `trace-matches-log` — `trace_id` рядка `http.problem` дорівнює `traceID` усіх
+  спанів, а його `span_id` є серед них.
+
+Три прогони кожного демо поспіль дали однаковий вивід:
+
+| Демо | Числа (три прогони) |
+| --- | --- |
+| `demo:logs` | `non-json-lines=0 layers=4 distinct-trace-ids=1 trace-id-matches-header=1 burst=8 burst-trace-ids=8 burst-uneven=0 burst-mixed=0 secret-req-logged=1 secret-in-logs=0`; рядків на запит — 4, усього рядків — 87 |
+| `demo:metrics` | `sent-ok=101 sent-fail=10 counter-delta=111 errors-delta=10 above-top-bucket=0 series-before=4 series-after=4 prometheus-agrees=1`; `slowest-request-ms` — 1215, 1225, 1240 |
+| `demo:trace` | `status=500 spans=12 orphan-spans=0 trace-matches-header=1 trace-matches-log=1 span-status-error=1`; 11 із 12 спанів — запити до бази |
+
 ## Grading
 
 ```bash
 docker compose up -d --wait
+docker compose -f observability/docker-compose.yml up -d --wait   # Jaeger, Prometheus, Grafana (ДЗ #29)
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:22918
+export PROMETHEUS_URL=http://127.0.0.1:22901
+export TRACE_API_URL=http://127.0.0.1:22904
 export DB_HOST=127.0.0.1 DB_PORT=6432 DB_USER=marketplace_a DB_PASSWORD=marketplace_dev DB_NAME=marketplace
 export BROKER_URL=amqp://marketplace:marketplace_dev@127.0.0.1:5672
 export REDIS_URL=redis://127.0.0.1:6379
@@ -2016,6 +2155,14 @@ exit 1 і називає їх (критерій 3), `npm run start:vault` бер
 `REDIS_*` і ключі JWT з блоку вище; `demo:cdn` потребує лише `STORAGE_*`. Тип файла для multipart у демо —
 `application/octet-stream` на 11 МіБ, тому серія не навантажує диск емулятора; дані MinIO лежать у томі
 `miniodata`.
+
+ДЗ #29 (ті самі `export`; `seed` не потрібен): `npm run demo:logs`, `npm run demo:metrics`, `npm run demo:trace`.
+Другий `docker compose` у блоці піднімає стенд спостережуваності з `observability/` (Jaeger на `22918`/`22904`,
+Prometheus на `22901`, Grafana на `22903`, логін `admin` / `marketplace_dev`); три `export` поруч — його адреси.
+Демо самі запускають API дочірнім процесом на порту `22950` з `dist/`, тому їм потрібні `npm run build`,
+`npm run migrate` і решта змінних блоку; `demo:logs` стенда не потребує, `demo:metrics` без `PROMETHEUS_URL`
+просто не друкує `prometheus-agrees`, `demo:trace` без Jaeger завершується з exit 1. Попередні ДЗ другого
+стенда не потребують.
 
 ### ДЗ #28: кластер
 
