@@ -6,7 +6,10 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
+import { layerLogger } from '../observability/logger';
 import { IdempotencyKeyReuseError } from './idempotency';
+
+const log = layerLogger('http.problem');
 
 interface ValidatorError {
   status?: number;
@@ -45,6 +48,10 @@ export class ProblemFilter implements ExceptionFilter {
     } else if (isValidatorError(exception)) {
       status = exception.status ?? status;
       detail = exception.message ?? detail;
+    }
+
+    if (status >= 500) {
+      log.error({ err: exception, status }, 'request failed');
     }
 
     res

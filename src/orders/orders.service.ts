@@ -10,6 +10,7 @@ import type { Principal } from '../auth/auth.service';
 import { CheckoutError } from '../checkout/checkout';
 import { buildPage, decodeCursor, Page } from '../common/pagination';
 import { OrderItem } from '../entities/order-item.entity';
+import { layerLogger } from '../observability/logger';
 import { Order } from '../entities/order.entity';
 import { productCardKey } from '../products/product-card';
 import { CacheAside } from '../redis/cache-aside';
@@ -18,6 +19,8 @@ import { OrderDto, toOrderDto } from './dto/order.dto';
 import { OrderEventsService } from './order-events.service';
 import { canTransition, OrderStatus } from './order-status';
 import { placeOrder } from './place-order';
+
+const log = layerLogger('orders.service');
 
 @Injectable()
 export class OrdersService {
@@ -35,6 +38,7 @@ export class OrdersService {
         `user ${actor.id} cannot place an order for user ${dto.user_id}`,
       );
     }
+    log.info({ buyer_id: dto.user_id }, 'placing order');
     try {
       const outcome = await placeOrder(this.dataSource, key, dto);
       if (!outcome.replayed) {

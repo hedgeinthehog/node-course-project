@@ -23,6 +23,9 @@ jobs:
       STORAGE_SECRET_KEY: ${{ secrets.STORAGE_PASSWORD || 'marketplace_dev' }}
       STORAGE_PASSWORD: ${{ secrets.STORAGE_PASSWORD || 'marketplace_dev' }}
       STORAGE_BUCKET: marketplace-files
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://127.0.0.1:22918
+      PROMETHEUS_URL: http://127.0.0.1:22901
+      TRACE_API_URL: http://127.0.0.1:22904
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -60,6 +63,10 @@ jobs:
       - run: npm run demo:upload
       - run: npm run demo:multipart
       - run: npm run demo:cdn
+      - run: npm run obs:up
+      - run: npm run demo:logs
+      - run: npm run demo:metrics
+      - run: npm run demo:trace
       - run: bash scripts/with-secrets.sh dev bash scripts/backup.sh
       - run: bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
       - run: npx redocly lint openapi/openapi.yaml

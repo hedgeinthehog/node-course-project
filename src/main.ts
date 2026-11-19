@@ -1,3 +1,4 @@
+import { shutdownTelemetry } from './observability/telemetry';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
@@ -21,6 +22,7 @@ async function bootstrap() {
     lifecycle.beginDrain();
     void sleep(drainMs)
       .then(() => app.close())
+      .then(shutdownTelemetry)
       .then(() => process.exit(0));
   });
 
