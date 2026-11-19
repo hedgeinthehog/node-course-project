@@ -1,7 +1,9 @@
 import { NestExpressApplication } from '@nestjs/platform-express';
 import pino from 'pino';
 import request from 'supertest';
+import { DataSource } from 'typeorm';
 import { REDACTED_PATHS } from '../../src/observability/logger';
+import { resetDatabase } from '../integration/testkit/database';
 import { createApp } from './create-app';
 
 describe('observability (e2e)', () => {
@@ -12,6 +14,7 @@ describe('observability (e2e)', () => {
     app = await createApp();
   });
   afterAll(() => app.close());
+  beforeEach(() => resetDatabase(app.get(DataSource)));
 
   const counted = async (labels: string) => {
     const { text } = await api().get('/metrics').expect(200);
