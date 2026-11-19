@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
+  APP,
   finish,
+  kubectl,
   must,
   ROOT,
   summary,
@@ -14,7 +16,7 @@ import {
 
 const PROFILE = process.env.PROFILE ?? 'hardened';
 const MIN_REQUESTS = 5000;
-const TAIL_MS = 10_000;
+const TAIL_MS = 5000;
 
 if (PROFILE !== 'hardened' && PROFILE !== 'naive') {
   throw new Error(`PROFILE must be hardened or naive, got "${PROFILE}"`);
@@ -45,10 +47,29 @@ async function waitUntilSteady(needed = 40) {
   }
 }
 
-const codes = (file) =>
+const samples = (file) =>
   existsSync(file)
-    ? readFileSync(file, 'utf8').split('\n').filter(Boolean)
+    ? readFileSync(file, 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => {
+          const [at, code] = line.split(' ');
+          return { at: Number(at), code };
+        })
     : [];
+
+const failed = (list) => list.filter(({ code }) => code !== '200').length;
+
+async function waitForOldPodsToLeave() {
+  const count = (json) => JSON.parse(json).items.length;
+  const { spec } = JSON.parse(kubectl('get', 'deployment', APP, '-o', 'json'));
+  for (let i = 0; i < 120; i++) {
+    const pods = kubectl('get', 'pods', '-l', `app=${APP}`, '-o', 'json');
+    if (count(pods) === spec.replicas) return;
+    await sleep(500);
+  }
+  throw new Error('old pods are still terminating');
+}
 
 const work = mkdtempSync(join(tmpdir(), 'rollout-'));
 const file = join(work, 'codes.txt');
@@ -63,30 +84,33 @@ try {
     stdio: 'inherit',
   });
   await sleep(3000);
-  const before = codes(file);
-  if (before.length === 0 || before.some((code) => code !== '200')) {
+  const before = samples(file);
+  if (before.length === 0 || failed(before) > 0) {
     throw new Error(
-      `the service is not healthy before the rollout: ${before.length} responses, ${before.filter((code) => code !== '200').length} not 200`,
+      `the service is not healthy before the rollout: ${before.length} responses, ${failed(before)} not 200`,
     );
   }
 
   const started = Date.now();
   deploy(PROFILE, String(started));
-  const rolloutSeconds = Math.round((Date.now() - started) / 1000);
+  await waitForOldPodsToLeave();
+  const finished = Date.now();
 
   await sleep(TAIL_MS);
-  while (codes(file).length < MIN_REQUESTS + 200) await sleep(500);
   load.kill('SIGTERM');
   await new Promise((resolve) => load.once('exit', resolve));
   load = undefined;
 
-  const all = codes(file);
-  const ok = all.filter((code) => code === '200').length;
+  const all = samples(file);
+  const during = all.filter(({ at }) => at >= started && at <= finished);
+  const outside = all.length - during.length;
   measured = {
-    requests: all.length,
-    ok,
-    failed: all.length - ok,
-    'rollout-seconds': rolloutSeconds,
+    requests: during.length,
+    ok: during.length - failed(during),
+    failed: failed(during),
+    'rollout-seconds': Math.round((finished - started) / 1000),
+    'outside-requests': outside,
+    'outside-failed': failed(all) - failed(during),
   };
 } finally {
   load?.kill('SIGKILL');
@@ -98,12 +122,14 @@ console.log(`profile=${PROFILE}`);
 summary(measured);
 if (PROFILE === 'hardened') {
   finish(
-    measured.failed === 0 && measured.requests >= MIN_REQUESTS,
-    'every response during the rolling update was 200',
+    measured.failed === 0 &&
+      measured['outside-failed'] === 0 &&
+      measured.requests >= MIN_REQUESTS,
+    `every response was 200, and at least ${MIN_REQUESTS} of them arrived while pods were being replaced`,
   );
 } else {
   finish(
-    measured.failed > 0,
+    measured.failed + measured['outside-failed'] > 0,
     'the naive profile dropped requests during the rolling update; the cluster is back on the hardened profile',
   );
 }

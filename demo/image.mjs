@@ -71,6 +71,7 @@ try {
     must('tar', ['-xf', join(unpacked, layer), '-C', target]);
   });
   console.log(`unpacked ${manifest.Layers.length} layers of ${IMAGE}`);
+  must('chmod', ['-R', 'u+rwX', layers]);
   tokenInLayers = filesWithToken(layers, token);
 } finally {
   run('chmod', ['-R', 'u+rwX', work]);
