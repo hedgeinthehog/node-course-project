@@ -28,6 +28,7 @@ export default async function globalSetup() {
       .withEnvironment({
         MINIO_ROOT_USER: 'test',
         MINIO_ROOT_PASSWORD: 'test-secret-1',
+        MINIO_SKIP_CLIENT: 'yes',
       })
       .withExposedPorts(9000)
       .withWaitStrategy(Wait.forHttp('/minio/health/live', 9000))

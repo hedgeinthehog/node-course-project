@@ -66,6 +66,8 @@ export const envSchema = z
       .enum(['development', 'test', 'production'])
       .default('development'),
     PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+    STARTUP_DELAY_MS: z.coerce.number().int().min(0).default(0),
+    SHUTDOWN_DRAIN_MS: z.coerce.number().int().min(0).default(0),
     DB_URL: z
       .string()
       .url()

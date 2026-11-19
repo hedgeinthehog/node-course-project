@@ -67,3 +67,12 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 # database dumps
 /backups/
+
+# build-time secret for docker build (BuildKit --secret), never committed
+/.npm_token
+
+# Pulumi local file backend and generated stack files
+/.pulumi/
+/infra/Pulumi.*.yaml
+/infra/node_modules
+/infra/bin

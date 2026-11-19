@@ -109,3 +109,24 @@ jobs:
       - name: Deploy the consumer and record the deployment
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         run: bash scripts/pact-broker.sh record-deployment marketplace-web
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Build-time secret (a decoy here, a real registry token would come from secrets.NPM_TOKEN)
+        run: printf '%s' "${{ secrets.NPM_TOKEN || 'ci-decoy-npm-token' }}" > .npm_token
+      - run: npm run image:build
+      - run: npm run demo:image
+      - name: Scan gate, fixable CRITICAL and HIGH findings must not exceed the working threshold
+        run: npm run scan
+        env:
+          SCAN_MAX: '20'
+      - run: npm --prefix infra ci
+      - name: The Pulumi program type-checks
+        run: npx tsc --noEmit
+        working-directory: infra

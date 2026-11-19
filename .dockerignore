@@ -13,3 +13,10 @@ db
 .github
 backups
 pgbouncer
+infra
+k8s
+demo
+docker
+.pulumi
+.npm_token
+README.md
