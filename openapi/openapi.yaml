@@ -34,6 +34,21 @@ tags:
       short-lived download links. The API authorizes and records; it is never in the data path.
 
 paths:
+  /metrics:
+    get:
+      tags: [health]
+      operationId: getMetrics
+      summary: Prometheus metrics — request counter and duration histogram by method, route template and status
+      responses:
+        '200':
+          description: Metrics in the Prometheus text exposition format.
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+
   /healthz:
     get:
       tags: [health]

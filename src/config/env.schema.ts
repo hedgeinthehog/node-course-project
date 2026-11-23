@@ -47,11 +47,13 @@ export const publicKeyringSchema = z
     return keyring;
   });
 
+const optionalHttpUrl = z.preprocess(
+  (value) => (value === '' ? undefined : value),
+  z.url({ protocol: /^https?$/ }).optional(),
+);
+
 export const storageSchema = z.object({
-  STORAGE_ENDPOINT: z.preprocess(
-    (value) => (value === '' ? undefined : value),
-    z.url({ protocol: /^https?$/ }).optional(),
-  ),
+  STORAGE_ENDPOINT: optionalHttpUrl,
   STORAGE_REGION: z.string().min(1).default('us-east-1'),
   STORAGE_ACCESS_KEY: z.string().min(1),
   STORAGE_SECRET_KEY: z.string().min(1),
@@ -85,6 +87,15 @@ export const envSchema = z
     JWT_PUBLIC_KEYS: publicKeyringSchema,
     REFRESH_TOKEN_PEPPER: z.string().min(16),
     ...storageSchema.shape,
+    LOG_LEVEL: z
+      .enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'])
+      .optional(),
+    OTEL_SERVICE_NAME: z.string().min(1).optional(),
+    OTEL_EXPORTER_OTLP_ENDPOINT: optionalHttpUrl,
+    PROMETHEUS_URL: optionalHttpUrl,
+    TRACE_API_URL: optionalHttpUrl,
+    GRAFANA_USER: z.string().min(1).optional(),
+    GRAFANA_PASSWORD: z.string().min(1).optional(),
     PACT_BROKER_URL: z.string().url().optional(),
     PACT_BROKER_TOKEN: z.string().optional(),
   })

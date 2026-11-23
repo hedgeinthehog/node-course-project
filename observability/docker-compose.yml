@@ -1,0 +1,42 @@
+name: marketplace-observability
+
+services:
+  jaeger:
+    image: jaegertracing/jaeger:2.11.0
+    ports:
+      - '22918:4318'
+      - '22904:16686'
+
+  prometheus:
+    image: prom/prometheus:v3.7.3
+    ports:
+      - '22901:9090'
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:9090/-/ready']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  grafana:
+    image: grafana/grafana:12.3.0
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    ports:
+      - '22903:3000'
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-marketplace_dev}
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/marketplace-red.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:3000/api/health']
+      interval: 2s
+      timeout: 3s
+      retries: 30

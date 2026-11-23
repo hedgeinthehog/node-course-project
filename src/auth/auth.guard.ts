@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import type { UserRole } from '../entities/user.entity';
+import { requestContext } from '../observability/request-context';
 import { AuthService } from './auth.service';
 import {
   AuthenticatedRequest,
@@ -32,6 +33,8 @@ export class AuthGuard implements CanActivate {
     const token = bearerToken(request.header('authorization'));
     if (!token) throw new UnauthorizedException('missing bearer token');
     request.user = await this.auth.authenticate(token);
+    const observed = requestContext();
+    if (observed) observed.userId = request.user.id;
 
     const roles = this.reflector.getAllAndOverride<UserRole[]>(
       ROLES_KEY,
