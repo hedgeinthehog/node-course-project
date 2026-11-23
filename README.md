@@ -1983,7 +1983,8 @@ Jaeger і приходить від клієнта в `traceparent`. Ендпо�
   стеком.
 - Redaction: `req.headers.authorization`, `req.headers.cookie`, `req.headers["x-session-id"]`,
   `req.body.password`, `req.body.refresh_token` замінюються на `[REDACTED]`; тіла запитів `/auth/*` у лог не
-  кладуться зовсім. redact не вгадує шляхи — вкладений обʼєкт без описаного шляху не сховається (це фіксує
+  кладуться зовсім, а з решти тіл береться лише allowlist скалярних полів (`user_id`, `status`, `name`,
+  `price_cents`) і кількість `items` — довільне вкладене поле на кшталт `meta.password` у лог не доходить. redact не вгадує шляхи — вкладений обʼєкт без описаного шляху не сховається (це фіксує
   e2e-тест), тому нове чутливе поле означає новий рядок у `REDACTED_PATHS`.
 
 ### Метрики RED
@@ -2032,7 +2033,9 @@ Jaeger і приходить від клієнта в `traceparent`. Ендпо�
 - `npm run demo:logs` — одне замовлення зі своїм `traceparent`, потім вісім однакових паралельно, кожне зі своїм;
   рядки логу групуються за `idempotency_key` і `trace_id`. `burst-mixed` — рядки, у яких `trace_id` не той, що
   їхав із цим ключем. Секрети: `GET /orders` з `Authorization: Bearer <маркер>` і `POST /auth/login` з паролем
-  -маркером; у stdout шукаються обидва маркери, справжній access-токен і справжній пароль.
+  -маркером, `POST /orders` із третім маркером у вкладеному `meta.password`; у stdout шукаються всі три
+  маркери, справжній access-токен і справжній пароль. `burst-uneven` — різниця між найбільшою і найменшою
+  групою рядків.
 - `npm run demo:metrics` — два скрейпи `/metrics` навколо 101 успішного і 10 невдалих `POST /orders`. Один з
   успішних повільний: демо 1,2 с тримає `SELECT … FOR UPDATE` на рядку товару. Відмова справжня: демо вішає на
   таблицю `orders` тригер, який відхиляє вставку для одного свого користувача, застосунок отримує помилку бази й
@@ -2047,7 +2050,7 @@ Jaeger і приходить від клієнта в `traceparent`. Ендпо�
 
 | Демо | Числа (три прогони) |
 | --- | --- |
-| `demo:logs` | `non-json-lines=0 layers=4 distinct-trace-ids=1 trace-id-matches-header=1 burst=8 burst-trace-ids=8 burst-uneven=0 burst-mixed=0 secret-req-logged=1 secret-in-logs=0`; рядків на запит — 4, усього рядків — 87 |
+| `demo:logs` | `non-json-lines=0 layers=4 distinct-trace-ids=1 trace-id-matches-header=1 burst=8 burst-trace-ids=8 burst-uneven=0 burst-mixed=0 secret-req-logged=1 secret-in-logs=0`; рядків на запит — 4, усього рядків — 88 |
 | `demo:metrics` | `sent-ok=101 sent-fail=10 counter-delta=111 errors-delta=10 above-top-bucket=0 series-before=4 series-after=4 prometheus-agrees=1`; `slowest-request-ms` — 1215, 1225, 1240 |
 | `demo:trace` | `status=500 spans=12 orphan-spans=0 trace-matches-header=1 trace-matches-log=1 span-status-error=1`; 11 із 12 спанів — запити до бази |
 

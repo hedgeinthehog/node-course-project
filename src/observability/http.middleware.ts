@@ -15,6 +15,24 @@ const routeOf = (request: RoutedRequest): string =>
   request.openapi?.expressRoute ??
   UNMATCHED;
 
+const LOGGED_BODY_FIELDS = ['user_id', 'status', 'name', 'price_cents'];
+
+function loggedBody(request: Request) {
+  const body: unknown = request.body;
+  if (request.path.startsWith('/auth/') || !body || typeof body !== 'object') {
+    return undefined;
+  }
+  const source = body as Record<string, unknown>;
+  const picked: Record<string, unknown> = {};
+  for (const field of LOGGED_BODY_FIELDS) {
+    if (['string', 'number'].includes(typeof source[field])) {
+      picked[field] = source[field];
+    }
+  }
+  if (Array.isArray(source.items)) picked.items = source.items.length;
+  return picked;
+}
+
 export function observeHttp(
   request: Request,
   response: Response,
@@ -44,9 +62,7 @@ export function observeHttp(
               method: request.method,
               url: request.originalUrl,
               headers: request.headers,
-              body: request.path.startsWith('/auth/')
-                ? undefined
-                : request.body,
+              body: loggedBody(request),
             },
             route: labels.route,
             status: response.statusCode,

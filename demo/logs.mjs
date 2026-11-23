@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { finish, summary } from './cluster.mjs';
 import {
   API_URL,
@@ -39,7 +39,21 @@ try {
     body: { email: stage.buyer.email, password: password.marker },
     headers: { traceparent: password.trace.header },
   });
-  secrets = [bearer, password];
+  const nested = { marker: `meta-${randomBytes(12).toString('hex')}` };
+  nested.trace = traceparent();
+  await call(API_URL, 'POST', '/orders', {
+    token,
+    body: {
+      user_id: stage.buyer.id,
+      items: [{ product_id: stage.productId, quantity: 1 }],
+      meta: { password: nested.marker },
+    },
+    headers: {
+      'idempotency-key': randomUUID(),
+      traceparent: nested.trace.header,
+    },
+  });
+  secrets = [bearer, password, nested];
 } finally {
   await stage.close();
 }
@@ -85,7 +99,7 @@ const result = {
     [...sentTrace.values()].includes(id),
   ).length,
   'burst-lines-per-request': sizes[0] ?? 0,
-  'burst-uneven': sizes.filter((size) => size !== sizes[0]).length,
+  'burst-uneven': sizes.length ? Math.max(...sizes) - Math.min(...sizes) : 0,
   'burst-mixed': mixed,
   'secret-req-logged': Number(
     secrets.every(({ trace }) => requestLogged(trace)),
