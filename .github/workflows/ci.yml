@@ -134,6 +134,8 @@ jobs:
         env:
           SCAN_MAX: '20'
       - run: npm --prefix infra ci
+      - name: Type-check the AWS programs (hw-31)
+        run: for d in infra/base infra/demo; do (cd "$d" && npm ci && npx tsc --noEmit) || exit 1; done
       - name: The Pulumi program type-checks
         run: npx tsc --noEmit
         working-directory: infra

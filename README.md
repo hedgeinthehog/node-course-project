@@ -1927,6 +1927,193 @@ etcd не потрапляє взагалі); тут оператор у кла�
 ціна нуля. `demo:image`: `stages=3 shell-inside=0 runtime-uid=65532 token-in-history=0 token-in-config=0
 token-in-layers=0`. `demo:pdb`: `healthy=3 minAvailable=2 evict-1=201 evict-2=429`.
 
+## AWS
+
+смуга: запасна (LocalStack)
+teardown-run: ДОДАТИ ПОСИЛАННЯ НА DISPATCH-ПРОГІН TEARDOWN
+Програми: `infra/base` і `infra/demo`; `package.json` із npm-скриптами — кореневий (`./package.json`), а не
+`infra/base/package.json`. Регіон: `eu-central-1` (зафіксований у `infra/*/Pulumi.localstack.yaml`; перевірки
+знесення ходять ще й у `us-east-1`).
+
+Стек у справжньому AWS не підіймався, рахунок за це ДЗ — $0; усе нижче виконано на
+`localstack/localstack:4.14.0` (порт `23166`, `npm run localstack:up`). Ціна піна, дослівно з документації
+LocalStack: «pinning to a prior version will opt you out of any future updates or security patches».
+
+### Два стеки
+
+| Стек | Програма | Що в ньому | Коштує |
+| --- | --- | --- | --- |
+| `base` | `infra/base` | бюджет, VPC `10.31.0.0/16`, 2 публічні + 2 приватні підмережі у двох AZ, IGW, дві route tables, три security groups, OIDC-провайдер GitHub і роль `hw31-ci-teardown` | $0, може стояти тиждень |
+| `demo` | `infra/demo` | RDS PostgreSQL (Multi-AZ instance deployment, `db.t4g.micro`, gp3 20 ГіБ, шифрування, backup 1 доба), ALB у публічних підмережах, target group із health check, Lambda-ціль; NAT + Elastic IP лише з `hw31-demo:withNat=true` | погодинно, живе лише на час роботи |
+
+- Бюджет — перший ресурс програми `base`: `COST`, `MONTHLY`, $5, сповіщення за фактом на 20 %, на весь акаунт без
+  фільтра по тегу. Budgets API у LocalStack Community немає (501), тому стек `localstack` вимикає його прапорцем
+  `hw31-base:withBudget: false`; у справжньому акаунті прапорець `true` (дефолт) і потрібен
+  `hw31-base:budgetEmail`.
+- «Приватна» підмережа — це відсутність рядка: у route table `private` немає маршруту `0.0.0.0/0` взагалі
+  (`private-default-route=0` рахується з `describe-route-tables` по приватних підмережах, не з назв). NAT у
+  постійному стеку немає: у приватних підмережах лише база.
+- Security groups: `alb` (80 з інтернету), `app` (3000 лише з групи `alb`), `db` (5432 лише з групи `app`);
+  обґрунтування кожного порту — коментарем у `infra/base/index.ts`.
+- Теги `Project=nodejs-pro-hw31`, `Stack`, `ManagedBy=pulumi` — одним блоком `aws:defaultTags` у
+  `Pulumi.<stack>.yaml`.
+- Трансформація в `infra/demo/index.ts` зареєстрована до першого ресурсу й проставляє кожному RDS-інстансу
+  `deletionProtection: false` і `skipFinalSnapshot: true`.
+- Ціль ALB — Lambda: без погодинного рядка EC2 і без третьої Public IPv4.
+
+### Гроші
+
+Ставки нижче — з умови ДЗ (знімок прайс-листа AWS 24.08.2026, `eu-central-1`); сам прайс-лист я не відкривав і
+дат публікації не звіряв, бо на запасній смузі нічого не тарифікується. Місяць — 730 годин.
+
+| Рядок | Ставка | За 730 год |
+| --- | --- | --- |
+| ALB | $0,02700/год | $19,71 |
+| RDS `db.t4g.micro` PostgreSQL, Multi-AZ instance | $0,03700/год | $27,01 |
+| gp3 20 ГіБ (Multi-AZ) | $0,274/ГіБ-міс × 20 | $5,48 |
+| Public IPv4 × 2 під ALB | $0,00500/год × 2 | $7,30 |
+| LCU (припущення про навчальне навантаження) | — | $0,29 |
+| Разом | $0,08191/год | $59,79 |
+
+Lambda-ціль рядка не додає. Вправа з NAT — $0,057 (одна білена година $0,052 + Public IPv4 $0,005).
+
+### IAM-роль для CI
+
+Роль `hw31-ci-teardown`: trust — `Principal.Federated` на OIDC-провайдер `token.actions.githubusercontent.com`,
+`StringEquals` на `aud = sts.amazonaws.com`, `StringLike` на `sub = repo:hedgeinthehog/node-course-project:*`.
+Політика дозволів — рівно те, що потрібно `pulumi destroy` стеку `demo` і шести перевіркам; `"*"` в `Action`
+немає, створювати роль нічого не вміє. `Resource: "*"`, бо половина дій (`Describe*`, `tag:GetResources`)
+не підтримує обмеження по ресурсу, а імена решти зʼявляються лише після `up`.
+
+| Дозвіл | Навіщо |
+| --- | --- |
+| `rds:DescribeDBInstances` | прочитати стан інстансу перед видаленням і порахувати `rds-left` |
+| `rds:DescribeDBSubnetGroups` | прочитати subnet group бази під час `destroy` |
+| `rds:ListTagsForResource` | провайдер читає теги RDS-ресурсів при refresh |
+| `rds:DeleteDBInstance` | видалити інстанс (без фінального снапшота — трансформація) |
+| `rds:DeleteDBSubnetGroup` | видалити subnet group після інстансу |
+| `elasticloadbalancing:DescribeLoadBalancers` | стан балансувальника і `alb-left` |
+| `elasticloadbalancing:DescribeLoadBalancerAttributes` | refresh атрибутів ALB перед видаленням |
+| `elasticloadbalancing:DescribeListeners` | refresh listener-а |
+| `elasticloadbalancing:DescribeListenerAttributes` | refresh атрибутів listener-а |
+| `elasticloadbalancing:DescribeTargetGroups` | refresh target group |
+| `elasticloadbalancing:DescribeTargetGroupAttributes` | refresh атрибутів target group |
+| `elasticloadbalancing:DescribeTargetHealth` | refresh привʼязки цілі |
+| `elasticloadbalancing:DescribeTags` | провайдер читає теги ELB-ресурсів |
+| `elasticloadbalancing:DeregisterTargets` | зняти Lambda з target group |
+| `elasticloadbalancing:DeleteListener` | видалити listener |
+| `elasticloadbalancing:DeleteTargetGroup` | видалити target group |
+| `elasticloadbalancing:DeleteLoadBalancer` | видалити ALB (разом із двома його Public IPv4) |
+| `ec2:DescribeNatGateways` | стан NAT і `nat-left` |
+| `ec2:DescribeAddresses` | стан Elastic IP і `eip-left` |
+| `ec2:DescribeAddressesAttribute` | refresh Elastic IP |
+| `ec2:DescribeTags` | провайдер читає теги EC2-ресурсів |
+| `ec2:DeleteNatGateway` | видалити NAT, якщо прапорець лишився ввімкненим |
+| `ec2:DisassociateAddress` | відвʼязати Elastic IP від NAT |
+| `ec2:ReleaseAddress` | звільнити Elastic IP, щоб вона не білилась idle |
+| `lambda:GetFunction` | refresh функції-цілі ALB |
+| `lambda:GetFunctionCodeSigningConfig` | refresh функції (провайдер читає завжди) |
+| `lambda:GetPolicy` | refresh дозволу ALB викликати функцію |
+| `lambda:ListVersionsByFunction` | refresh функції (провайдер читає завжди) |
+| `lambda:RemovePermission` | прибрати дозвіл ALB на виклик |
+| `lambda:DeleteFunction` | видалити функцію |
+| `iam:GetRole` | refresh ролі виконання Lambda |
+| `iam:ListRolePolicies` | refresh ролі перед видаленням |
+| `iam:ListAttachedRolePolicies` | refresh ролі перед видаленням |
+| `iam:ListInstanceProfilesForRole` | перевірка перед видаленням ролі |
+| `iam:DetachRolePolicy` | відчепити керовані політики від ролі Lambda |
+| `iam:DeleteRole` | видалити роль виконання Lambda |
+| `tag:GetResources` | запит по тегу `Project` — `tagged-resources-left` |
+
+Негативний тест (`npm run evidence:base`, `aws iam simulate-principal-policy` проти ролі):
+
+```
+sim-allowed-action=rds:DeleteDBInstance
+sim-allowed=allowed
+sim-denied-action=iam:CreateUser
+sim-denied=explicitDeny
+```
+
+**LocalStack цю політику не застосовує. Я не перевіряв її локально, бо перевірити локально неможливо.** Числа
+вище — відповідь симулятора емулятора, а не рушія AWS, який ухвалює рішення: він навіть називає відмову
+`explicitDeny`, хоча явного `Deny` у політиці немає (AWS відповів би `implicitDeny`). Те, що відмови в
+LocalStack не існує, показує власний транскрипт (`npm run evidence:localstack-iam`, `ENFORCE_IAM=1`):
+
+```
+enforce-iam=1
+deny-all-create-bucket=200
+deny-all=200
+fake-key=200
+log-lines=6
+iam-request-log-lines=3
+enforce-iam-log-lines=0
+```
+
+Юзер із явним `{"Effect":"Deny","Action":"*","Resource":"*"}` створив бакет і поклав обʼєкт, ключ
+`TOTALLY_FAKE_KEY_12345` цей обʼєкт прочитав, у лозі контейнера за цей час — жодного рядка про заборону. Так
+само в прогоні teardown роль «приймає» OIDC-токен GitHub, і це не доказ trust policy: на той самий виклик
+`assume-role-with-web-identity` з рядком `not-a-real-token` замість JWT LocalStack у моєму прогоні так само
+видав креденшели ролі. Емулятор бреше в бік дозволу; те саме робив MinIO в ДЗ #26.
+
+### Знесення
+
+`.github/workflows/teardown.yml`: `schedule` (02:00 UTC) + `workflow_dispatch`, `permissions: id-token: write`,
+довгоживучих ключів немає ні в репозиторії, ні в конвеєрі. На запасній смузі джоба сама піднімає LocalStack,
+`base`, усе, що вдається з `demo` (роль і функція Lambda; RDS і ALB впираються в 501), потім
+`pulumi destroy --yes` обох стеків і `scripts/teardown-checks.sh`: `pulumi stack export | jq …` по обох стеках
+і пʼять запитів до API по `eu-central-1` та `us-east-1`. RDS і ELBv2 в LocalStack Community немає взагалі,
+тому 501 від цих двох запитів скрипт рахує як нуль і лише в режимі емулятора; будь-яка інша помилка зупиняє
+джобу. NAT у джобі не піднімається: видалений NAT Gateway ще якийсь час видно в API у стані `deleted`
+(у LocalStack — до рестарту контейнера, в AWS — близько години), і запит по тегу чесно показав би його як
+`tagged-resources-left=1`; тому `demo:nat` — окрема вправа, а не частина знесення.
+
+### Що на запасній смузі не зроблено
+
+- RDS і ALB написані в коді й типізуються; `evidence/preview-demo.txt` — вивід `pulumi preview` (10 кроків, серед
+  них `aws:rds/instance:Instance`), `evidence/501.txt` — вивід `pulumi up`, що впирається в `StatusCode: 501`.
+  Формулювання помилки в моєму прогоні 23.11.2026 — «The API for service rds is either not included in your
+  current license plan or has not yet been emulated by LocalStack», а не «not included within your LocalStack
+  license»: друге образ 4.14.0 друкує лише тоді, коли може завантажити каталог сервісів з
+  `api.localstack.cloud/v1/license/catalog`, а ця адреса зараз відповідає `404
+  licensing.latest_version_not_found`, і образ падає в загальне повідомлення (гілка `case _` у
+  `localstack/aws/catalog_exceptions.py`). Код відповіді той самий — 501.
+- `demo:failover` і `demo:alb` написані під справжній AWS і на LocalStack завершуються помилкою 501;
+  `demo:nat` працює (NAT у Community є): `nat-minutes=1`, `nat-billed-hours=1` — хвилини виміряні, а «білена
+  година» тут арифметика (`ceil`), рахунку в емулятора немає.
+
+### RDS Multi-AZ проти мого стека з ДЗ #15
+
+RDS Multi-AZ забирає на себе те, що в #15 я робив руками для доступності: синхронний standby в іншій AZ,
+автоматичне перемикання з тим самим endpoint-ом, патчі мінорних версій, щоденний снапшот і PITR у межах
+`backupRetentionPeriod`. Він не замінює решту. Standby в Multi-AZ instance deployment не читається, тож моя
+репліка для читань із #15 лишається окремою задачею (read replica — окремий інстанс і окремий рядок рахунку).
+PgBouncer RDS не дає: пул зʼєднань або мій, або RDS Proxy за окремі гроші. `backup.sh` теж лишається мені:
+снапшоти RDS живуть у тому самому акаунті й зникають разом з інстансом, якщо видалити його без фінального
+снапшота (а саме так ми його й зносимо), це не логічний дамп, який можна відновити деінде чи перевірити
+restore-drill-ом. І ротація пароля, ролі та права в базі — так само мої.
+
+### KMS
+
+`storageEncrypted: true` шифрує том бази ключем `aws/rds`, яким керує AWS; власний customer-managed key я не
+створював — це рядок рахунку, який не зникає від `destroy` того ж дня. KMS не заміна сховищу з ДЗ #11, а шар
+під ним: у сховищі лежить мій секрет (той самий `ENCRYPTION_KEY`), а KMS зберігає ключ, яким цей секрет
+зашифровано, і ніколи не віддає його назовні — розшифрувати можна лише викликом API з правом `kms:Decrypt`.
+
+### Бекенд стану
+
+У ДЗ #28 стан лежав у `file://.pulumi` поруч із кодом: кластер жив на тій самій машині. На основній смузі так
+не можна — воркер GitHub не бачить ноутбук, і teardown не знав би, що зносити; потрібен Pulumi Cloud або S3.
+На запасній смузі стан знову `file://` (`.pulumi-aws/`, поза git), і це чесно: «хмара» — контейнер, який
+живе на тій самій машині, що й стан, а в CI обидва народжуються й зникають в одній джобі. Парольна фраза
+стану (`PULUMI_CONFIG_PASSPHRASE`) локально приходить зі сховища через `scripts/with-secrets.sh`.
+
+### Команди
+
+`npm run localstack:up`, `npm run up:base`, `npm run evidence:base`, `npm run evidence:localstack-iam`,
+`npm run evidence:demo` (preview + `up`, що впирається в 501), `npm run demo:nat`, `npm run destroy:demo`,
+`npm run destroy:base`, `npm run teardown:checks` (шість перевірок, результат дописується в
+`evidence/demos.txt`). Потрібні Docker, `pulumi`, AWS CLI v2 і `jq`.
+
 ## Observability
 
 Питання розділу: «о 03:15 один запит віддав 500 — скільки часу треба, щоб сказати, що саме сталося». Відповідь

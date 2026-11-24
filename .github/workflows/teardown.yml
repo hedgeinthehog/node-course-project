@@ -1,0 +1,49 @@
+name: teardown
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  teardown:
+    runs-on: ubuntu-latest
+    env:
+      SKIP_VAULT: '1'
+      HW31_STACK: ci
+      # The state of this lane lives inside the job (LocalStack in a container), so the passphrase and
+      # the database password protect nothing that outlives the run.
+      PULUMI_CONFIG_PASSPHRASE: ephemeral-localstack-state
+      DB_PASSWORD: marketplace_dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Pulumi CLI
+        run: |
+          command -v pulumi || { curl -fsSL https://get.pulumi.com | sh; echo "$HOME/.pulumi/bin" >> "$GITHUB_PATH"; }
+      - run: npm --prefix infra/base ci && npm --prefix infra/demo ci
+      - run: npm run localstack:up
+      - run: npm run up:base
+      - name: Assume the CI role with the GitHub OIDC token
+        run: |
+          . scripts/aws-env.sh
+          TOKEN="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)"
+          ROLE="$(bash scripts/aws-stack.sh base stack output ciRoleArn)"
+          aws sts assume-role-with-web-identity --role-arn "$ROLE" --role-session-name teardown \
+            --web-identity-token "$TOKEN" --query 'AssumedRoleUser.Arn' --output text
+          echo "oidc-role-assumed=1"
+      - name: Bring up what there is to tear down (RDS and ALB answer 501 on LocalStack Community)
+        run: npm run up:demo || echo "up:demo stopped at the 501 of the emulator, the partial stack stays to be destroyed"
+      - name: pulumi destroy --yes (demo, then base)
+        run: |
+          npm run destroy:demo
+          npm run destroy:base
+      - name: Six checks of emptiness
+        run: bash scripts/teardown-checks.sh

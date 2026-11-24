@@ -76,3 +76,8 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 /infra/Pulumi.*.yaml
 /infra/node_modules
 /infra/bin
+/.pulumi-aws/
+/infra/base/node_modules
+/infra/demo/node_modules
+/infra/base/bin
+/infra/demo/bin

@@ -1,0 +1,9 @@
+name: hw31-base
+description: Marketplace on AWS — everything that costs $0 (budget, network, security groups, CI role)
+runtime:
+  name: nodejs
+  options:
+    typescript: true
+config:
+  hw31-base:githubRepo: hedgeinthehog/node-course-project
+  hw31-base:withBudget: true
