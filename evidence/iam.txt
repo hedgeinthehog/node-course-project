@@ -1,0 +1,4 @@
+sim-allowed-action=rds:DeleteDBInstance
+sim-allowed=allowed
+sim-denied-action=iam:CreateUser
+sim-denied=explicitDeny

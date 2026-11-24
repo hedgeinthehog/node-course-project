@@ -1,0 +1,36 @@
+Previewing update (localstack):
+
+ +  pulumi:pulumi:Stack hw31-demo-localstack create 
+ +  pulumi:pulumi:Stack hw31-demo-localstack create read pulumi:pulumi:StackReference organization/hw31-base/localstack
+ +  pulumi:pulumi:Stack hw31-demo-localstack create read pulumi:pulumi:StackReference organization/hw31-base/localstack
+ +  aws:rds:SubnetGroup db create 
+ +  aws:iam:Role alb-target create 
+ +  aws:lb:TargetGroup api create 
+ +  aws:lb:LoadBalancer api create 
+ +  aws:lambda:Function alb-target create 
+ +  aws:rds:Instance db create 
+ +  aws:lb:Listener http create 
+ +  aws:lambda:Permission alb create 
+ +  aws:lb:TargetGroupAttachment api create 
+ +  pulumi:pulumi:Stack hw31-demo-localstack create 
+Outputs:
+    albDnsName    : [unknown]
+    dbIdentifier  : "hw31-db"
+    targetGroupArn: [unknown]
+
+Resources:
+    + 10 to create
+
+
+# pulumi preview --json: operation and full resource type of every step
+create pulumi:pulumi:Stack hw31-demo-localstack
+read pulumi:pulumi:StackReference organization/hw31-base/localstack
+create aws:iam/role:Role alb-target
+create aws:rds/subnetGroup:SubnetGroup db
+create aws:lb/loadBalancer:LoadBalancer api
+create aws:lb/targetGroup:TargetGroup api
+create aws:rds/instance:Instance db
+create aws:lambda/function:Function alb-target
+create aws:lb/listener:Listener http
+create aws:lambda/permission:Permission alb
+create aws:lb/targetGroupAttachment:TargetGroupAttachment api

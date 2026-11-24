@@ -1,0 +1,8 @@
+name: hw31-demo
+description: Marketplace on AWS — everything billed by the hour (RDS, ALB, NAT behind a flag)
+runtime:
+  name: nodejs
+  options:
+    typescript: true
+config:
+  hw31-demo:withNat: false

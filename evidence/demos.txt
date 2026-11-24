@@ -1,0 +1,8 @@
+nat-minutes=1
+nat-billed-hours=1
+state-resources-left=0
+tagged-resources-left=0
+rds-left=0
+alb-left=0
+nat-left=0
+eip-left=0
