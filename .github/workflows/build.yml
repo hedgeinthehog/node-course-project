@@ -28,9 +28,9 @@ jobs:
       contents: read
       packages: write
     env:
-      IMAGE: ghcr.io/${{ github.repository }}
+      REGISTRY_IMAGE: ghcr.io/${{ github.repository }}
     outputs:
-      image-ref: ${{ env.IMAGE }}:${{ inputs.sha }}
+      image-ref: ${{ env.REGISTRY_IMAGE }}:${{ inputs.sha }}
       digest: ${{ steps.build.outputs.digest }}
       gate-scan-exit: ${{ steps.scan.outputs.exit }}
     steps:
@@ -54,14 +54,14 @@ jobs:
           file: docker/Dockerfile
           push: true
           provenance: false
-          tags: ${{ env.IMAGE }}:${{ inputs.sha }}
+          tags: ${{ env.REGISTRY_IMAGE }}:${{ inputs.sha }}
           secret-files: npm_token=.npm_token
       - name: One line per build in this run
-        run: echo "$(date -u +%FT%TZ) run=${{ github.run_id }} ${{ env.IMAGE }}:${{ inputs.sha }} ${{ steps.build.outputs.digest }}" >> build.log
+        run: echo "$(date -u +%FT%TZ) run=${{ github.run_id }} ${{ env.REGISTRY_IMAGE }}:${{ inputs.sha }} ${{ steps.build.outputs.digest }}" >> build.log
       - name: Take the image back from the registry by digest
         run: |
-          docker pull "$IMAGE@${{ steps.build.outputs.digest }}"
-          docker tag "$IMAGE@${{ steps.build.outputs.digest }}" marketplace-api:local
+          docker pull "$REGISTRY_IMAGE@${{ steps.build.outputs.digest }}"
+          docker tag "$REGISTRY_IMAGE@${{ steps.build.outputs.digest }}" marketplace-api:local
       - run: npm run demo:image
       - name: Step 4, scan gate (fixable CRITICAL and HIGH findings must not exceed the threshold)
         id: scan
