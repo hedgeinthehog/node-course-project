@@ -2112,8 +2112,11 @@ contract-ok=0 contract-broken=1 arch-ok=0 arch-broken=1 scan-ok=0 scan-broken=1`
 і сам вирішує, чи піде вона далі. Токен джоба просить у GitHub (`permissions: id-token: write` на джобі, не на
 файлі) з `aud = marketplace-deploy`.
 
-Дозволені `sub`: `repo:hedgeinthehog/node-course-project:pull_request` (джоба в PR) і
-`repo:hedgeinthehog/node-course-project:ref:refs/heads/master` (деплой). Умова на `sub` — єдиний рядок, що
+Дозволені `sub`: `repo:hedgeinthehog@37834796/node-course-project@1344214076:pull_request` (джоба в PR) і
+`repo:hedgeinthehog@37834796/node-course-project@1344214076:ref:refs/heads/master` (деплой). Форма з ID власника
+й репозиторію взята з лога власного прогону: зі старою формою `repo:hedgeinthehog/node-course-project:…` гейт
+на справжньому токені відповів `sig-verified=1 policy-allow=0` і зупинив джобу. ID не змінюються, якщо
+репозиторій перейменують, а чужий репозиторій з тим самим імʼям їх не отримає. Умова на `sub` — єдиний рядок, що
 відділяє цей репозиторій від чужого: без нього підпис, `iss` і `aud` лишаються зеленими для токена будь-якого
 репозиторію GitHub. `npm run demo:oidc` перевіряє той самий гейт на власній RSA-парі, згенерованій у момент
 запуску: `green` → `1 1`, `foreign-sub` (підпис і `aud` коректні, репозиторій чужий) → `1 0`, `bad-signature`

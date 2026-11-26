@@ -2,7 +2,7 @@
   "iss": "https://token.actions.githubusercontent.com",
   "aud": "marketplace-deploy",
   "sub": [
-    "repo:hedgeinthehog/node-course-project:pull_request",
-    "repo:hedgeinthehog/node-course-project:ref:refs/heads/master"
+    "repo:hedgeinthehog@37834796/node-course-project@1344214076:pull_request",
+    "repo:hedgeinthehog@37834796/node-course-project@1344214076:ref:refs/heads/master"
   ]
 }
