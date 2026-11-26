@@ -1,0 +1,59 @@
+name: deploy
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    uses: ./.github/workflows/quality.yml
+    with:
+      contract-base: HEAD^
+    secrets: inherit
+
+  build:
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build.yml
+    with:
+      sha: ${{ github.sha }}
+    secrets: inherit
+
+  staging:
+    needs: [quality, build]
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+    uses: ./.github/workflows/deliver.yml
+    with:
+      environment: staging
+      image-ref: ${{ needs.build.outputs.image-ref }}
+      digest: ${{ needs.build.outputs.digest }}
+      gate-scan-exit: ${{ needs.build.outputs.gate-scan-exit }}
+      head-sha: ${{ github.sha }}
+      evidence-name: pipeline-evidence
+
+  production:
+    needs: [build, staging]
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+    uses: ./.github/workflows/deliver.yml
+    with:
+      environment: production
+      image-ref: ${{ needs.build.outputs.image-ref }}
+      digest: ${{ needs.build.outputs.digest }}
+      gate-scan-exit: ${{ needs.build.outputs.gate-scan-exit }}
+      head-sha: ${{ github.sha }}
+      evidence-name: pipeline-evidence-production

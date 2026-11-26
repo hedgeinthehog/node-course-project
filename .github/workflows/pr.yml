@@ -1,0 +1,44 @@
+name: pr
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    uses: ./.github/workflows/quality.yml
+    with:
+      contract-base: origin/${{ github.base_ref }}
+    secrets: inherit
+
+  build:
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build.yml
+    with:
+      sha: ${{ github.event.pull_request.head.sha }}
+    secrets: inherit
+
+  deliver:
+    needs: [quality, build]
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+    uses: ./.github/workflows/deliver.yml
+    with:
+      environment: preview
+      image-ref: ${{ needs.build.outputs.image-ref }}
+      digest: ${{ needs.build.outputs.digest }}
+      gate-scan-exit: ${{ needs.build.outputs.gate-scan-exit }}
+      head-sha: ${{ github.event.pull_request.head.sha }}
+      evidence-name: pipeline-evidence
+      cost-approved: ${{ contains(github.event.pull_request.labels.*.name, 'cost-approved') }}
