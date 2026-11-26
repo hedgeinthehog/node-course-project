@@ -2054,6 +2054,144 @@ Jaeger і приходить від клієнта в `traceparent`. Ендпо�
 | `demo:metrics` | `sent-ok=101 sent-fail=10 counter-delta=111 errors-delta=10 above-top-bucket=0 series-before=4 series-after=4 prometheus-agrees=1`; `slowest-request-ms` — 1215, 1225, 1240 |
 | `demo:trace` | `status=500 spans=12 orphan-spans=0 trace-matches-header=1 trace-matches-log=1 span-status-error=1`; 11 із 12 спанів — запити до бази |
 
+## CI/CD
+
+До цього ДЗ усе з розділу «Kubernetes» запускав я зі своєї машини; тепер те саме робить конвеєр, а вимір
+`demo:rollout` із ДЗ #28 став умовою злиття гілки.
+
+cost-gate-bypass-label: cost-approved
+
+### Воркфлоу і джоби
+
+| Файл | Тригер | Що робить |
+| --- | --- | --- |
+| `.github/workflows/pr.yml` | `pull_request` | `quality` і `build` паралельно → `deliver` (середовище `preview`) |
+| `.github/workflows/deploy.yml` | `push` у `master`, `workflow_dispatch` | `quality` і `build` → `staging` → `production`, той самий digest |
+| `quality.yml`, `build.yml`, `deliver.yml` | `workflow_call` | спільні частини, щоб місце збірки і кроки доставки існували в одному примірнику |
+
+```
+pr:      quality ─┐
+         build ───┴─> deliver(preview)
+deploy:  quality ─┐
+         build ───┴─> deliver(staging) ─> deliver(production)
+```
+
+- `quality` — чотири джоби: `gates` (сходинки 1–3), `db` (демо всіх попередніх ДЗ на compose-стенді), `tests`
+  (integration + e2e), `contract` (Pact і `can-i-deploy`).
+- `build` — єдине місце збірки: образ збирається один раз, їде в GHCR (`ghcr.io/hedgeinthehog/node-course-project`)
+  з тегом коміту, digest віддається в `outputs`; тут же `demo:image` і сходинка 4 (`npm run scan`).
+- `deliver` — гейт OIDC → kind у раннері → образ у вузол за digest → `pulumi preview --json` → гейт вартості →
+  `pulumi up` → `demo:rollout` → артефакт `pipeline-evidence` (`if: always()`).
+
+Усі `uses:` запінені за SHA коміту з тегом у коментарі; локальні `./.github/workflows/*.yml` — виняток.
+`actionlint` (1.7.7) проходить без зауважень. Кожному PR відповідає рівно один прогін — `pr`; на `push` у
+гілку нічого не запускається, тому артефакт завжди лежить у тому прогоні, який знаходиться за SHA голови.
+
+### Чотири сходинки гейтів
+
+| Сходинка | Інструмент | Що ловить | Зламаний вхід у `demo:gates` |
+| --- | --- | --- | --- |
+| 1. Типи й стиль | `tsc --noEmit` + `oxlint` | помилку в коді | `demo/fixtures/types-broken`: рядок у змінній типу `number` |
+| 2. Контракт | `oasdiff breaking … --fail-on ERR` (`scripts/gate-contract.sh`) | зміну спеки, яка ламає клієнта на v1, навіть якщо його Pact-а в нас немає | нове обовʼязкове поле `coupon` у `CreateOrder` |
+| 3. Архітектура | `dependency-cruiser` (`.dependency-cruiser.cjs`) | заборонений імпорт між модулями | `demo/fixtures/arch-broken`: `products` імпортує з `orders` |
+| 4. Образ | `npm run scan` (trivy, поріг із ДЗ #28) | виправні CRITICAL/HIGH понад поріг | `SCAN_MAX=-1` |
+
+У PR база контракту — спека з базової гілки (`origin/<base>`), на деплої — попередній коміт. Правила
+архітектури: сутності не імпортують нічого поза `entities` (єдиний виняток — словник статусів
+`orders/order-status.ts`, він названий у правилі), `config` і `observability` не знають про фічі, `products` не
+лізе в `orders`/`checkout`/`files`, `files` стоїть окремо, `auth` не імпортує бізнес-модулі.
+`npm run demo:gates` запускає кожен інструмент двічі й друкує коди виходу: `types-ok=0 types-broken=2
+contract-ok=0 contract-broken=1 arch-ok=0 arch-broken=1 scan-ok=0 scan-broken=1`.
+
+### OIDC замість ключа
+
+Умова довіри — файл `oidc/policy.json`: `iss`, `aud` і список дозволених `sub`. Гейт — `scripts/oidc-gate.mjs`:
+тягне `openid-configuration` емітента, бере звідти `jwks_uri`, перевіряє підпис токена публічним ключем із
+набору (`jose`), звіряє `iss`, `aud`, `sub` з файлом і друкує `iss`, `aud`, `sub`, `sig-verified`,
+`policy-allow` — сам токен не друкується ніде. Хмари за гейтом немає: він стоїть першим кроком джоби `deliver`
+і сам вирішує, чи піде вона далі. Токен джоба просить у GitHub (`permissions: id-token: write` на джобі, не на
+файлі) з `aud = marketplace-deploy`.
+
+Дозволені `sub`: `repo:hedgeinthehog/node-course-project:pull_request` (джоба в PR) і
+`repo:hedgeinthehog/node-course-project:ref:refs/heads/master` (деплой). Умова на `sub` — єдиний рядок, що
+відділяє цей репозиторій від чужого: без нього підпис, `iss` і `aud` лишаються зеленими для токена будь-якого
+репозиторію GitHub. `npm run demo:oidc` перевіряє той самий гейт на власній RSA-парі, згенерованій у момент
+запуску: `green` → `1 1`, `foreign-sub` (підпис і `aud` коректні, репозиторій чужий) → `1 0`, `bad-signature`
+→ `0 0`.
+
+### Build once, promote за digest
+
+Образ збирається в одному кроці одного воркфлоу (`build.yml`). `deliver` отримує `digest` з `outputs` джоби
+збірки, тягне `ghcr.io/…@sha256:…` у вузол kind (`crictl pull`) і ставить у конфіг Pulumi саме цю адресу —
+тег коміту існує для людини, деплоїться не він. `REV` у шаблоні пода дорівнює digest, тому новий образ завжди
+дає нову ревізію. У `deploy.yml` середовища `staging` і `production` отримують один і той самий digest; збірки
+між ними немає. Усі три середовища — kind у раннері: `preview` живе в прогоні PR, `staging` і `production` —
+у двох послідовних джобах деплою.
+
+### Секрети
+
+Два набори, які не змішуються. Секрети конвеєра (реєстр, «хмара») не зберігаються ніде: реєстр — через
+`GITHUB_TOKEN` із `packages: write`, право на деплой — через OIDC-токен на час джоби. Секрети застосунку
+в под потрапляють посиланням `secretKeyRef` на Kubernetes Secret, який створює Pulumi зі змінних оточення;
+локально ці змінні приходять із vault (Infisical, ДЗ #11) через `scripts/with-secrets.sh`, а в прогоні
+конвеєра середовище живе хвилини, тому джоба `deliver` генерує їх на місці (`openssl rand`) і одразу реєструє
+маску. `secret-in-manifest` рахує конвеєр: скільки разів значення пʼяти секретів трапились у
+`deployment.json`.
+
+Імена, які воркфлоу читають як `${{ secrets.X }}`. Секретів застосунку серед них немає: compose-стенд і
+кластер у раннері живуть хвилини й працюють на дев-значеннях та значеннях, згенерованих у джобі.
+
+| Імʼя | Навіщо |
+| --- | --- |
+| `GITHUB_TOKEN` | видається автоматично на час джоби; вхід у GHCR (`packages: write` у збірці, `read` у доставці) |
+| `PACT_BROKER_URL` | адреса зовнішнього Pact Broker (не хмара і не реєстр образів); без неї джоба `contract` піднімає брокер із compose |
+| `PACT_BROKER_TOKEN` | токен цього брокера; для compose-брокера порожній |
+
+Секрети застосунку, які Pulumi-програма кладе в Kubernetes Secret, а под отримує посиланням:
+
+| Змінна | Джерело | Як потрапляє в под |
+| --- | --- | --- |
+| `DB_PASSWORD` | сховище (#11) | `secretKeyRef` і файл `db_password` |
+| `BROKER_URL` | сховище (#11) | `secretKeyRef` |
+| `JWT_PRIVATE_KEY` | сховище (#11) | `secretKeyRef` |
+| `REFRESH_TOKEN_PEPPER` | сховище (#11) | `secretKeyRef` |
+| `STORAGE_SECRET_KEY` | сховище (#11) | `secretKeyRef` |
+| `PULUMI_CONFIG_PASSPHRASE` | сховище (#11) | у под не потрапляє: шифрує стан Pulumi |
+
+Межа маскування. GitHub замінює в логу лише точне входження зареєстрованого значення. Він не впізнає секрет,
+який перекодували (base64, URL-encode, hex), розрізали на частини, вклали в довший рядок на кшталт URL з
+паролем, або який інструмент надрукував по-своєму (JSON з екрануванням, перший рядок багаторядкового ключа).
+Тому маска тут — страховка, а не захист: у воркфлоу немає `echo "$SECRET"`, `env`, `printenv` чи `set -x`,
+токен OIDC живе лише в змінній одного кроку, а значення, що мають похідні форми, не друкуються взагалі. Це
+шосте місце витоку після git-історії, логу застосунку, шару образу, `docker inspect` і `docker history`.
+
+### Гейт вартості
+
+`src/mapping.ts` перекладає план (`pulumi preview --json`) у гроші: для кожного Deployment бере
+`resources.requests` контейнерів, множить на `replicas` і на ставку. Маніфести в локальному кластері нічого
+не коштують, тому рахується, скільки ті самі запити коштували б на керованому compute.
+
+| Ставка | Значення | Джерело |
+| --- | --- | --- |
+| vCPU-година | $0,04048 | AWS Fargate, Linux/x86, us-east-1 — <https://aws.amazon.com/fargate/pricing/> |
+| ГБ-година памʼяті | $0,004445 | там само |
+| годин у місяці | 730 | конвенція прайс-листа AWS |
+
+Ставки записані з памʼяті про цю сторінку, сьогоднішню її версію я не звіряв: перевіряється механіка гейта, а
+не точність прайсу. API: 3 репліки × (0,1 vCPU, 192 МіБ) = $10,69 на місяць; бекінг-сервіси запитів не
+оголошують і дають $0. `npm run gate:cost` (`src/cost-gate.ts`) читає `PLAN_JSON` і `infra/cost-policy.json`
+(бюджет $25, база $10,69) і падає, якщо сума більша за `COST_BUDGET_USD` або якщо план виріс відносно бази
+більше ніж на $10 чи 20 % — гейт реагує на зміну, а не лише на суму. Обхід — лейбл `cost-approved` на PR:
+гейт усе одно друкує `gate=fail`, але джоба йде далі.
+
+### Артефакт
+
+`pipeline-evidence`: `evidence.txt`, `deployment.json`, `plan.json`, `rollout.txt`, `build.log`.
+`scripts/pipeline-evidence.sh` збирає `evidence.txt` з файлів прогону: digest — з `outputs` збірки і з
+маніфеста в кластері, `oidc-*` — з виводу гейта, `rollout-*` — з виводу `demo:rollout`, `build-invocations` —
+`wc -l` від `build.log`. У раннері поріг обсягу `demo:rollout` — 2000 запитів у вікні викочування
+(`ROLLOUT_MIN_REQUESTS`), `failed=0` лишається жорстким.
+
 ## Grading
 
 ```bash
@@ -2166,6 +2304,25 @@ Prometheus на `22901`, Grafana на `22903`, логін `admin` / `marketplace
 `npm run migrate` і решта змінних блоку; `demo:logs` стенда не потребує, `demo:metrics` без `PROMETHEUS_URL`
 просто не друкує `prometheus-agrees`, `demo:trace` без Jaeger завершується з exit 1. Попередні ДЗ другого
 стенда не потребують.
+
+### ДЗ #32: конвеєр
+
+Локальні демо не ходять у GitHub і не потребують кластера; потрібен лише Docker (oasdiff і сканер запускаються
+образами) і зібраний образ застосунку для сходинки 4:
+
+```bash
+git clone https://github.com/hedgeinthehog/node-course-project && cd node-course-project && git checkout hw-32
+npm ci
+export SKIP_VAULT=1                     # у грейдера немає доступу до сховища
+printf 'dummy-npm-token' > .npm_token   # секрет етапу збірки; у git його немає
+npm run image:build                     # marketplace-api:local для сходинки сканера
+npm run demo:gates                      # чотири сходинки, обидва боки
+npm run demo:oidc                       # три випадки перевірки токена
+PLAN_JSON=/tmp/hw32/plan.json COST_BUDGET_USD=0 npm run gate:cost
+```
+
+Жодне з трьох демо секретів застосунку не читає, тому `export` значень тут не потрібен. `plan.json` береться з
+артефакту `pipeline-evidence` прогону PR. Пакет образу в GHCR публічний, digest звіряється з реєстром.
 
 ### ДЗ #28: кластер
 

@@ -1,0 +1,4 @@
+{
+  "compilerOptions": { "strict": true, "noEmit": true, "target": "ES2023", "module": "nodenext" },
+  "files": ["price.ts"]
+}

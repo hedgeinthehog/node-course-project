@@ -1,8 +1,35 @@
-name: ci
+name: quality
 
-on: [push, pull_request]
+on:
+  workflow_call:
+    inputs:
+      contract-base:
+        description: Git ref whose OpenAPI spec is the published contract to compare against
+        required: true
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Step 1, types and style
+        run: npx tsc --noEmit && npm run lint
+      - name: Step 2, the contract does not break those who already live on it
+        run: bash scripts/gate-contract.sh "${{ inputs.contract-base }}"
+      - name: Step 3, modules do not reach into each other
+        run: npm run gate:arch
+
   db:
     runs-on: ubuntu-latest
     env:
@@ -10,25 +37,25 @@ jobs:
       DB_HOST: 127.0.0.1
       DB_PORT: '6432'
       DB_USER: marketplace_a
-      DB_PASSWORD: ${{ secrets.DB_PASSWORD || 'marketplace_dev' }}
+      DB_PASSWORD: marketplace_dev
       DB_NAME: marketplace
-      BROKER_PASSWORD: ${{ secrets.BROKER_PASSWORD || 'marketplace_dev' }}
-      BROKER_URL: amqp://marketplace:${{ secrets.BROKER_PASSWORD || 'marketplace_dev' }}@127.0.0.1:5672
+      BROKER_PASSWORD: marketplace_dev
+      BROKER_URL: amqp://marketplace:marketplace_dev@127.0.0.1:5672
       REDIS_URL: redis://127.0.0.1:6379
       REDIS_QUEUE_URL: redis://127.0.0.1:6382
       JWT_KID: ci
-      REFRESH_TOKEN_PEPPER: ${{ secrets.REFRESH_TOKEN_PEPPER || 'ci-pepper-0123456789abcdef' }}
+      REFRESH_TOKEN_PEPPER: ci-pepper-0123456789abcdef
       STORAGE_ENDPOINT: http://127.0.0.1:9000
       STORAGE_ACCESS_KEY: marketplace
-      STORAGE_SECRET_KEY: ${{ secrets.STORAGE_PASSWORD || 'marketplace_dev' }}
-      STORAGE_PASSWORD: ${{ secrets.STORAGE_PASSWORD || 'marketplace_dev' }}
+      STORAGE_SECRET_KEY: marketplace_dev
+      STORAGE_PASSWORD: marketplace_dev
       STORAGE_BUCKET: marketplace-files
       OTEL_EXPORTER_OTLP_ENDPOINT: http://127.0.0.1:22918
       PROMETHEUS_URL: http://127.0.0.1:22901
       TRACE_API_URL: http://127.0.0.1:22904
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -36,8 +63,6 @@ jobs:
       - run: npm ci
       - name: One-off ES256 key pair for this run (the real key lives in the vault)
         run: node scripts/jwt-keys.mjs ci | grep -E '^JWT_(PRIVATE_KEY|PUBLIC_KEYS)=' >> "$GITHUB_ENV"
-      - run: npx tsc --noEmit
-      - run: npm run lint
       - run: npm run build
       - run: npm run migrate
       - run: npm run storage:init
@@ -74,8 +99,8 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -90,8 +115,8 @@ jobs:
       PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
       PACT_VERSION: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -116,24 +141,3 @@ jobs:
       - name: Deploy the consumer and record the deployment
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         run: bash scripts/pact-broker.sh record-deployment marketplace-web
-
-  image:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - name: Build-time secret (a decoy here, a real registry token would come from secrets.NPM_TOKEN)
-        run: printf '%s' "${{ secrets.NPM_TOKEN || 'ci-decoy-npm-token' }}" > .npm_token
-      - run: npm run image:build
-      - run: npm run demo:image
-      - name: Scan gate, fixable CRITICAL and HIGH findings must not exceed the working threshold
-        run: npm run scan
-        env:
-          SCAN_MAX: '20'
-      - run: npm --prefix infra ci
-      - name: The Pulumi program type-checks
-        run: npx tsc --noEmit
-        working-directory: infra

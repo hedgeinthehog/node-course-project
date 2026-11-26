@@ -15,7 +15,7 @@ import {
 } from './cluster.mjs';
 
 const PROFILE = process.env.PROFILE ?? 'hardened';
-const MIN_REQUESTS = 5000;
+const MIN_REQUESTS = Number(process.env.ROLLOUT_MIN_REQUESTS ?? 5000);
 const TAIL_MS = 5000;
 
 if (PROFILE !== 'hardened' && PROFILE !== 'naive') {
